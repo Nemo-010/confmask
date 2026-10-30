@@ -144,7 +144,7 @@ Its only coupling to the rest of the crate is `Mask::inherit_fds` and
 | layer | what it proves |
 |---|---|
 | `cargo test` (12) | buffer semantics, seal behaviour, store round-trip, wrong passphrase, ciphertext has no plaintext, daemon round-trip |
-| `tests/run.sh` (24) | end-to-end behaviour, with a negative control per case and `SKIP` for refused mechanisms |
+| `tests/run.sh` (25 on an unprivileged host, 28 in the VM) | end-to-end behaviour, with a negative control per case and `SKIP` for refused mechanisms |
 | `vm/run.sh` | the same suite inside a real 6.12 kernel under QEMU TCG, which is the only place `ptrace` and user namespaces are available in a locked-down environment |
 
 `vm/debug.sh SCRIPT` boots the same VM and runs one script, for

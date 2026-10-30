@@ -173,7 +173,7 @@ see the leak, or a later "no leak" verdict means nothing), then with it.
 
 ```sh
 cargo test                      # 12 unit tests
-sh tests/run.sh                 # 24 cases; mechanisms the host refuses are SKIPPED, not passed
+sh tests/run.sh                 # 25 assertions; mechanisms the host refuses are SKIPPED, not passed
 sh vm/run.sh                    # the same suite inside a QEMU micro-VM
 ```
 
@@ -186,22 +186,25 @@ PASS t6-env-name-published      the environ showed CONFMASK_SECRET_TOKEN=3
 PASS t6-no-leak                 zero sightings of the value in any /proc
 SKIP t10-cmdline (ptrace refused on this host)
 SKIP t14-isolate (no unprivileged user namespaces on this host)
-== VERDICT: ALL-PASS (skipped 5) ==
+== VERDICT: ALL-PASS (skipped 6) ==
 ```
 
 `vm/run.sh` boots a real 6.12 kernel under QEMU TCG — no KVM, no root — so
-the two modes this host refuses are verified there instead:
+the two modes this host refuses are verified there instead (28 assertions,
+1 skipped):
 
 ```
 PASS t10-cmdline                no marker visible in any /proc cmdline
 PASS t11-comm                   the label is the process name top shows
 PASS t12-environ                the environment is not in /proc
 PASS t13-redact-secret          redaction does not disturb fd delivery
-PASS t14-isolate (inner pids 3 < host pids 65)
+PASS t13-redact-no-leak
+PASS t14-isolate (inner pids 3 < host pids 64)
 PASS t14-private-tmp
 PASS t15-isolate-unprivileged   the same, from an unprivileged account
 PASS t15-redact-unprivileged
 PASS t15-redact-unprivileged-cmdline
+SKIP t5-daemon-not-dumpable (running as root)
 == VERDICT: ALL-PASS (skipped 1) ==
 ```
 
