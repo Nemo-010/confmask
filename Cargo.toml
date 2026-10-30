@@ -1,0 +1,23 @@
+[package]
+name = "confmask"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+description = "Confidential computing without special hardware: keep secrets and command lines away from the other accounts on a shared Linux host"
+license = "0BSD"
+repository = "https://github.com/Nemo-010/confmask"
+readme = "README.md"
+keywords = ["secrets", "privacy", "ptrace", "proc", "ci"]
+categories = ["command-line-utilities", "os::linux-apis"]
+
+[dependencies]
+libc = "0.2"
+zeroize = "1"
+argon2 = "0.5"
+chacha20poly1305 = { version = "0.10", features = ["std"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"

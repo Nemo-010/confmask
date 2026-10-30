@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: build
+        run: cargo build --release
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: unit tests
+        run: cargo test --lib
+      - name: suites
+        run: sh tests/run.sh
+
+  vm:
+    # The interesting half: a runner usually bans ptrace and unprivileged
+    # user namespaces, so the two strongest modes are only exercised here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: install qemu
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 cpio
+      - name: micro-VM suite
+        run: sh vm/run.sh
