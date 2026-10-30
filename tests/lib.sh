@@ -4,7 +4,11 @@
 # Observers read /proc directly: that IS the ground truth `ps` reads, and
 # it keeps the suites runnable in a minimal initramfs.
 
-BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Suites cd to their own directory before sourcing this file, so the
+# working directory is already right; re-resolving $0 here would break
+# when the suite was invoked as `sh tests/run.sh` (relative path, already
+# consumed by the caller's cd).
+BIN_DIR="$(pwd)"
 TOOL="$BIN_DIR/confmask"
 WORK="${CONFMASK_TEST_DIR:-/tmp/confmask-tests}"
 
