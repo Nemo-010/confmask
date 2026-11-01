@@ -80,6 +80,7 @@ working budget is 10 GiB; keep `target/` and `vm/cache/` trimmed.
 | MSRV 1.85.1 build (`--bins`) | clean, no warnings |
 | `cargo package` (68 files) | packaged |
 | `vm/run.sh` (see below) | all suites pass except the two items in "Not verified" |
+| CI on GitHub (push `399f0a0`, run 41270963973) | `msrv`, `build` and `suites-in-vm` all green |
 
 Full VM run of 2026-10-31, kernel 6.12.114-r0, x86_64, QEMU TCG, root
 and uid 1000 passes: `validate`, `suite`, `stress`, `edge` (except e7,
@@ -90,6 +91,13 @@ Re-run on this tree, 2026-11-01, same pinned kernel (6.12.114-r0,
 x86_64, QEMU TCG, root then uid 1000): exit 0, `VM-HARNESS: ALL-PASS`,
 392 PASS, 0 FAIL, 5 SKIP, `cargo test --lib` 40 passed, clippy clean.
 The secret side is in this run: `daemon` passes d1-d3 for both uids.
+
+CI ran the same tree on GitHub (push `399f0a0`, run 41270963973):
+`msrv` 16 s, `build` 57 s, `suites-in-vm` 9 m 14 s, all three green.
+The `msrv` job failed on the previous commit, where `rust-version` still
+said 1.74 and `cargo build --locked` could not parse `zeroize`'s 2024
+edition; it reads the floor out of `Cargo.toml`, so the two cannot
+silently disagree again.
 
 Evidence that the hard cases work, from `tests/core.sh` inside the VM:
 
@@ -163,9 +171,8 @@ Two other gates:
    feeds a bad key to `--env`.
 4. The Go case (`tests/suite.sh` T7b) needs a Go toolchain and runs on a
    host only; the initramfs has none.
-5. CI (`.github/workflows/ci.yml`) does not run in this sandbox. The
-   pinned action SHAs were checked against the tags with the GitHub
-   API.
+5. The full aarch64 suite: only a smoke boot was done (see above), and
+   the host this checkpoint was taken on has no `qemu-system-aarch64`.
 5. `tests/audit.sh` skips on this kernel: the `EXECVE` netlink record
    stops before the argument text (`payload_len=35`, ends at `a0=`), so
    the control cannot see its own secret. The suite prints the reason and
