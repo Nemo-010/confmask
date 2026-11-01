@@ -2,7 +2,7 @@
 name = "confmask"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.74"
+rust-version = "1.85"
 description = "Confidential execution without trusted hardware: redact the /proc metadata of a process tree while programs keep their real arguments"
 license = "0BSD"
 repository = "https://github.com/Nemo-010/confmask"

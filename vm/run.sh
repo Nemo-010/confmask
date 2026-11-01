@@ -62,7 +62,7 @@ if [ "$ARCH" = x86_64 ]; then
         rustup target add "$I686" || echo "NOTE: cannot install target $I686"
     fi
     if cargo build --release --target "$I686" --bin confmask-testcases; then
-        cp "$ROOT/target/$I686/release/confmask-testcases" "$ROOT/tests/testcases32"
+        cp "${CARGO_TARGET_DIR:-$ROOT/target}/$I686/release/confmask-testcases" "$ROOT/tests/testcases32"
     else
         echo "NOTE: i686 build failed; tests/testcases32 not produced (32-bit case will not run)"
     fi

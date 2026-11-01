@@ -51,15 +51,22 @@ Other gates: `sh vm/run.sh --old-kernel` boots the pinned 5.15 kernel,
 and `CONFMASK_VM_ARCH=aarch64 sh vm/run.sh` builds and boots the
 aarch64 harness from an x86_64 host.
 
-MSRV check. The 1.74.1 toolchain is installed under
-`/home/qaidvoid/.local/share/rustup`; `CARGO_HOME` is
-`/home/qaidvoid/.cache/errand/cargo` and `$HOME` is writable, so only
-the extra target directories need `CARGO_TARGET_DIR`:
+MSRV check. `rust-version` in `Cargo.toml` is the floor, and CI builds
+at exactly that version. The floor is set by the dependency set, not by
+hand: the secret side pulls `argon2`, `chacha20poly1305` and `zeroize`,
+and `zeroize` 1.8 declares `rust-version = "1.85"` with `edition =
+"2024"`, which no compiler older than 1.85 can parse. The source also
+uses `c"…"` literals (stable since 1.77) instead of `b"…\0"` casts, so
+1.85 covers both. Locally:
 
 ```sh
-TC=/home/qaidvoid/.local/share/rustup/toolchains/1.74.1-x86_64-unknown-linux-gnu/bin
-CARGO_TARGET_DIR=/workspace/target-msrv PATH=$TC:$PATH $TC/cargo build --bins
+rustup toolchain install 1.85 --profile minimal
+cargo +1.85 build --bins
 ```
+
+Both `vm/run.sh` and `vm/common.sh` read the artifact directory from
+`CARGO_TARGET_DIR` when the caller sets one, so a shared target dir
+works (`env.sh` in the dev sandbox does exactly that).
 
 Disk: `df /workspace` reports the host pool, not the sandbox quota. The
 working budget is 10 GiB; keep `target/` and `vm/cache/` trimmed.
@@ -70,8 +77,8 @@ working budget is 10 GiB; keep `target/` and `vm/cache/` trimmed.
 |---|---|
 | `cargo clippy --all-targets -- -D warnings` | clean |
 | `cargo test --lib` | 40 passed |
-| MSRV 1.74.1 build (`--bins`) | clean, no warnings |
-| `cargo package` (62 files) | packaged |
+| MSRV 1.85.1 build (`--bins`) | clean, no warnings |
+| `cargo package` (68 files) | packaged |
 | `vm/run.sh` (see below) | all suites pass except the two items in "Not verified" |
 
 Full VM run of 2026-10-31, kernel 6.12.114-r0, x86_64, QEMU TCG, root
@@ -128,9 +135,9 @@ Suite behaviour worth knowing when a case fails:
   another uid out before the peer check ever runs.
 
 Host checks: `cargo clippy --all-targets -- -D warnings` clean,
-`cargo test --lib` 28 passed, MSRV 1.74.1 build of all bins clean,
+`cargo test --lib` 40 passed, MSRV 1.85.1 build of all bins clean,
 `cargo build --release --examples` clean, `cargo package
---allow-dirty --no-verify` 63 files (541.8 KiB).
+--allow-dirty --no-verify` 68 files (650.7 KiB).
 
 Two other gates:
 
@@ -203,7 +210,7 @@ the suite named, "docs" means documentation only.
 | 14 | impl | label mode byte, label fallback, 4096-byte cap, NUL/LF/CR rejection, `-` means blank; N22, N23, `edge.sh` E7 |
 | 15 | impl | T9 via `env`, stress label truncation, always-rebuild `run.sh`, scoped `kill_comm` |
 | 16 | impl | shebang case in `edge.sh`, `vm/cases` folded in, non-root VM pass, aarch64 console, pinned apks, `daemon_neg.sh`, `core.sh`, `options.sh`; the Go case is still host-only |
-| 17 | impl | no `c""` literal, MSRV 1.74 verified, CI MSRV job; see "How to verify" |
+| 17 | impl | `c""` literals, MSRV floor in `Cargo.toml` and the CI MSRV job that builds at it; see "How to verify" |
 | 18 | docs | README threat table, DESIGN trust boundary, script window content, fork-to-entry window, dated run line |
 | 19 | impl | early argv snapshot + zero before parsing, label written into the block, `mask_self` returns `Result`, `CONFMASK_NO_SELFMASK` in `--help`; O12, O13 |
 | 20 | impl | original program string as `argv[0]`, `--argv0`, `--comm`, redacted `Debug`, NUL/LF/CR validation, truncation caps in help; O2 to O8 |

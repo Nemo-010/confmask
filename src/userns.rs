@@ -202,9 +202,9 @@ fn mount_proc(data: *const libc::c_void) -> libc::c_int {
     // null or a NUL-terminated constant.
     unsafe {
         libc::mount(
-            b"proc\0".as_ptr() as *const libc::c_char,
-            b"/proc\0".as_ptr() as *const libc::c_char,
-            b"proc\0".as_ptr() as *const libc::c_char,
+            c"proc".as_ptr(),
+            c"/proc".as_ptr(),
+            c"proc".as_ptr(),
             libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
             data,
         )
@@ -224,7 +224,7 @@ pub fn child_setup_proc() -> io::Result<ProcMode> {
     let rc = unsafe {
         libc::mount(
             std::ptr::null(),
-            b"/\0".as_ptr() as *const libc::c_char,
+            c"/".as_ptr(),
             std::ptr::null(),
             libc::MS_REC | libc::MS_PRIVATE,
             std::ptr::null(),

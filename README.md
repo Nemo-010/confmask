@@ -340,7 +340,7 @@ shortly after start) applies here in the same way.
 
 ## Build
 
-Any Linux 5.3 or newer, x86-64 or aarch64, glibc or musl. Rust 1.74 or
+Any Linux 5.3 or newer, x86-64 or aarch64, glibc or musl. Rust 1.85 or
 newer (`rust-version` in `Cargo.toml`, checked by a CI job):
 
 ```sh

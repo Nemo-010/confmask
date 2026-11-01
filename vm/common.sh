@@ -148,7 +148,7 @@ vm_stage() {
     # explicit paths, not brace expansion: /bin/sh is dash on Debian/Ubuntu
     mkdir -p "$st/bin" "$st/app/tests" "$st/dev" "$st/proc" "$st/sys" "$st/tmp"
     cp "$BUSYBOX_BIN" "$st/bin/busybox"
-    rel="$ROOT/target/$MUSL_TARGET/release"
+    rel="${CARGO_TARGET_DIR:-$ROOT/target}/$MUSL_TARGET/release"
     cp "$rel/confmask"           "$st/app/tests/confmask"
     cp "$rel/confmaskd"          "$st/app/tests/confmaskd"
     cp "$rel/confmask-testcases" "$st/app/tests/testcases"

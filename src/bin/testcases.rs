@@ -85,10 +85,7 @@ fn echoargs(args: &[String]) -> i32 {
     0
 }
 
-const A_NULL: &std::ffi::CStr = match std::ffi::CStr::from_bytes_with_nul(b"a\0") {
-    Ok(c) => c,
-    Err(_) => panic!("bad literal"),
-};
+const A_NULL: &std::ffi::CStr = c"a";
 
 fn c(s: &str) -> CString {
     CString::new(s).expect("NUL in argument")
