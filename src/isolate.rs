@@ -18,7 +18,7 @@
 //! extra fork, which a ptrace supervisor cannot drive), so `confmask run`
 //! offers them as separate modes and says which one you got.
 
-use crate::redact::tracer::ExitState;
+use crate::ExitState;
 use std::ffi::{CStr, CString};
 use std::io;
 
@@ -292,14 +292,12 @@ pub fn run(
             libc::waitpid(pid, &mut st, 0);
             libc::close(go[1]);
         }
-        return Ok(ExitState {
-            code: if libc::WIFEXITED(st) {
-                libc::WEXITSTATUS(st)
-            } else {
-                126
-            },
-            signal: None,
-        });
+        let code = if libc::WIFEXITED(st) {
+            libc::WEXITSTATUS(st)
+        } else {
+            126
+        };
+        return Ok(ExitState::plain(code, None));
     }
     let map_err = write_id_maps(pid);
     // SAFETY: releasing the child.
@@ -328,20 +326,11 @@ pub fn run(
         break;
     }
     if libc::WIFEXITED(status) {
-        Ok(ExitState {
-            code: libc::WEXITSTATUS(status),
-            signal: None,
-        })
+        Ok(ExitState::plain(libc::WEXITSTATUS(status), None))
     } else if libc::WIFSIGNALED(status) {
         let s = libc::WTERMSIG(status);
-        Ok(ExitState {
-            code: 128 + s,
-            signal: Some(s),
-        })
+        Ok(ExitState::plain(128 + s, Some(s)))
     } else {
-        Ok(ExitState {
-            code: 255,
-            signal: None,
-        })
+        Ok(ExitState::plain(255, None))
     }
 }

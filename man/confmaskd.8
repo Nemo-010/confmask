@@ -1,0 +1,139 @@
+.TH CONFMASKD 8 "2026" "confmask 0.1.0" "System Manager's Manual"
+.SH NAME
+confmaskd \- run masked jobs for local clients that do not hold the secrets
+.SH SYNOPSIS
+.B confmaskd
+[\fIOPTIONS\fR]
+.SH DESCRIPTION
+.B confmaskd
+holds a job environment in memory, redacts its own /proc entry, and runs
+jobs for local clients.
+A client sends a command and receives the job's stdio and exit status.
+The client never holds the environment the job needs.
+.PP
+.B Warning:
+an allowed uid may execute arbitrary programs with the daemon's
+privileges and inherit its environment.
+Grant
+.B \-\-allow\-uid
+only to uids that may already do that.
+Use
+.B \-\-run\-as\-uid
+on a root daemon to run each job with the client's own uid and gid.
+.SH OPTIONS
+.TP
+.BR \-S ", " \-\-socket " \fIPATH\fR"
+Unix socket to bind.
+Default: \fI$XDG_RUNTIME_DIR\fR/confmask.sock when that directory is
+owned by the effective uid and not group or other writable; else
+/run/confmask.sock as root; else /tmp/confmask-\fIuid\fR.sock.
+.TP
+.BR \-l ", " \-\-label " \fINAME\fR"
+Label for a job whose client sends no label.
+Default: confmask-job.
+A client
+.B \-\-label
+replaces it.
+.TP
+.BR \-e ", " \-\-env\-file " \fIFILE\fR"
+Load KEY=VALUE lines as the job environment.
+Repeatable; later files win.
+Grammar: blank lines and lines that start with # are skipped;
+.B export
+before KEY is allowed; KEY has printable ASCII only, no space and no
+\&'='; VALUE loses surrounding blanks, and one pair of matching ' or "
+quotes around it is removed; there are no escapes; a NUL byte is an
+error.
+Errors name the file and the line.
+A warning appears when the file is readable by group or other.
+.TP
+.B \-\-no\-inherit\-env
+Jobs get the \-\-env\-file variables only.
+.TP
+.B \-\-keep\-env
+Leave
+.B /proc/\fIpid\fB/environ
+visible for jobs.
+.TP
+.BI \-\-allow\-uid " UID"
+Also accept connections from this uid.
+Repeatable.
+The daemon's own uid and root are always accepted.
+.TP
+.B \-\-run\-as\-uid
+Root daemon only.
+Run each job with the uid and gid of the client.
+.TP
+.BI \-\-socket\-mode " OCT"
+Socket permission bits, in octal.
+Default: 600.
+.TP
+.BI \-\-io\-timeout " SECONDS"
+Drop a client that stalls while it sends its request or reads the
+response.
+Default: 30.
+0 means no limit.
+.TP
+.BI \-\-job\-timeout " SECONDS"
+Kill a job tree that runs longer than this and return code 137.
+Default: no limit.
+.TP
+.BI \-\-jobs " N"
+Run up to N jobs at once, one worker process per connection.
+Default: 1.
+.TP
+.BI \-\-max\-job\-bytes " N"
+Largest total size of the job arguments, each counted with its NUL byte.
+Default: 1048576.
+.TP
+.BR \-q ", " \-\-quiet
+Suppress diagnostics.
+.TP
+.BR \-v ", " \-\-verbose
+Log each accepted job.
+.TP
+.BR \-V ", " \-\-version
+Print the version.
+.TP
+.BR \-h ", " \-\-help
+Print the help text.
+.SH PROTOCOL
+One request per connection, one job per connection.
+.PP
+Client to daemon, with SCM_RIGHTS carrying stdin, stdout and stderr
+(exactly three descriptors):
+.PP
+.RS
+1 byte version (2)
+.br
+"CMK1"  u32 label_len  label  u8 label_mode  u32 argc
+.br
+\ \ \ \ \ \ \ \ argc * (u32 len, bytes)
+.RE
+.PP
+\fIlabel_mode\fR is 0 for the daemon label, 1 for an empty label and 2
+for the text that follows.
+.PP
+Daemon to client:
+.PP
+.RS
+i32 exit_code  u32 has_signal  i32 signal  u32 msg_len  msg
+.RE
+.PP
+All integers are little-endian.
+Limits: argc <= 4096, one argument <= 1 MiB, the whole request <= 8 MiB,
+the label <= 4096 bytes.
+.SH AUTHORISATION
+SO_PEERCRED decides.
+The daemon's own uid and root are accepted.
+The socket is created with mode 0600.
+The client also checks the peer uid of the socket it connected to.
+.SH SOCKET SAFETY
+The daemon refuses to start when the socket path is a symlink or not a
+socket, when a live daemon answers on it, or when the parent directory is
+not owned by the effective uid.
+It binds with umask 077 and verifies the bound socket afterwards.
+.SH SEE ALSO
+.BR confmask (1)
+.SH LICENSE
+0BSD.

@@ -6,8 +6,14 @@
 
 use std::io;
 
-pub const MAX_ARGV: usize = 8192;
-pub const MAX_ENVV: usize = 65536;
+/// Largest argv array the session relocates.  The kernel bounds the
+/// total argument size by the stack limit, so this is not reachable
+/// with the default 8 MiB stack.
+pub const MAX_ARGV: usize = 1 << 20;
+/// Largest envp array the session relocates.
+pub const MAX_ENVV: usize = 1 << 20;
+/// Kernel `MAX_ARG_STRLEN`: 32 pages of 4 KiB.
+pub const MAX_STRLEN: usize = 32 * 4096;
 /// Cap on saved argv+env string bytes (per exec).
 pub const MAX_STR_TOTAL: usize = 6 << 20;
 /// Cap on the redaction block written below the tracee's stack pointer.
@@ -15,9 +21,14 @@ pub const MAX_HIDDEN: usize = 8 << 20;
 /// Keep one page below SP untouched (redaction block starts below it).
 pub const SCRATCH_GUARD: u64 = 4096;
 
+/// Number of `read_mem` calls so far (process-wide).  The tracer logs the
+/// delta per completion stop.
+pub static READ_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Copy `buf.len()` bytes from the tracee at `addr`.  Returns bytes copied
 /// (short copy possible at an unmapped boundary), or -1 on failure.
 pub fn read_mem(pid: libc::pid_t, addr: u64, buf: &mut [u8]) -> isize {
+    READ_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let local = libc::iovec {
         iov_base: buf.as_mut_ptr() as *mut libc::c_void,
         iov_len: buf.len(),
@@ -105,37 +116,86 @@ fn poke_fallback(pid: libc::pid_t, addr: u64, data: &[u8]) -> isize {
     }
 }
 
-/// Read a NUL-terminated string; `None` when unreadable.  Length-capped
-/// at `max` bytes (the returned string is truncated there, never an error).
-pub fn read_cstr(pid: libc::pid_t, addr: u64, max: usize) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(256);
-    let mut buf = [0u8; 256];
-    while out.len() < max {
-        let k = read_mem(pid, addr + out.len() as u64, &mut buf);
+/// Read a NUL-terminated string of at most `max` bytes (without the NUL).
+/// Returns `None` when the first byte is unreadable.  The flag is `true`
+/// when a NUL was found within the cap, `false` when the string is
+/// longer (the returned bytes are then the first `max` bytes).
+///
+/// The read window starts at 256 bytes and doubles up to 16 KiB, so a
+/// string of 4 KiB needs about five reads.
+pub fn read_cstr_checked(pid: libc::pid_t, addr: u64, max: usize) -> Option<(Vec<u8>, bool)> {
+    let mut out: Vec<u8> = Vec::with_capacity(256);
+    let mut window = 256usize;
+    let mut buf = vec![0u8; 16 * 1024];
+    while out.len() <= max {
+        let want = window.min(buf.len());
+        let k = read_mem(pid, addr + out.len() as u64, &mut buf[..want]);
         if k <= 0 {
-            return None;
+            if out.is_empty() {
+                return None;
+            }
+            // Unmapped boundary before a NUL: report as unterminated.
+            return Some((out, false));
         }
-        if let Some(pos) = buf[..k as usize].iter().position(|&b| b == 0) {
+        let got = k as usize;
+        if let Some(pos) = buf[..got].iter().position(|&b| b == 0) {
             out.extend_from_slice(&buf[..pos]);
-            return Some(out);
+            if out.len() > max {
+                out.truncate(max);
+                return Some((out, false));
+            }
+            return Some((out, true));
         }
-        out.extend_from_slice(&buf[..k as usize]);
+        out.extend_from_slice(&buf[..got]);
+        if window < buf.len() {
+            window *= 2;
+        }
     }
-    out.truncate(max.saturating_sub(1));
-    Some(out)
+    out.truncate(max);
+    Some((out, false))
+}
+
+/// Read a NUL-terminated string; `None` when unreadable.  The result is
+/// cut at `max` bytes.
+pub fn read_cstr(pid: libc::pid_t, addr: u64, max: usize) -> Option<Vec<u8>> {
+    read_cstr_checked(pid, addr, max).map(|(v, _)| v)
 }
 
 /// Read a NUL-terminated pointer array (kernel inline argv[]/envp[] style).
-pub fn read_ptr_array(pid: libc::pid_t, addr: u64, maxn: usize) -> Option<Vec<u64>> {
-    let mut out = Vec::with_capacity(64);
+/// The flag is `true` when the terminating NULL was found within `maxn`
+/// entries.  Reads in chunks of 512 words.
+pub fn read_ptr_array(pid: libc::pid_t, addr: u64, maxn: usize) -> Option<(Vec<u64>, bool)> {
+    let mut out: Vec<u64> = Vec::with_capacity(64);
+    let mut chunk = [0u8; 4096];
     while out.len() < maxn {
-        let word = read_word(pid, addr + (out.len() as u64) * 8)?;
-        if word == 0 {
-            return Some(out);
+        let at = addr + (out.len() as u64) * 8;
+        let words = ((maxn - out.len()).min(512)) * 8;
+        let mut k = read_mem(pid, at, &mut chunk[..words]);
+        if k < 8 {
+            // Near an unmapped boundary: retry one word.
+            k = read_mem(pid, at, &mut chunk[..8]);
+            if k != 8 {
+                if out.is_empty() {
+                    return None;
+                }
+                return None;
+            }
         }
-        out.push(word);
+        let n = (k as usize) / 8;
+        for i in 0..n {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(&chunk[i * 8..i * 8 + 8]);
+            let w = u64::from_ne_bytes(b);
+            if w == 0 {
+                return Some((out, true));
+            }
+            out.push(w);
+            if out.len() >= maxn {
+                break;
+            }
+        }
     }
-    Some(out)
+    Some((out, false))
 }
 
 fn read_word(pid: libc::pid_t, addr: u64) -> Option<u64> {
@@ -159,7 +219,9 @@ fn read_write_word(pid: libc::pid_t, addr: u64, val: u64) -> bool {
 }
 
 /// Copy the strings behind a pointer array into local memory.
-/// Sets `overflow` when the total-size cap is hit mid-way.
+/// Sets `overflow` when the total-size cap is hit or a string is longer
+/// than `MAX_STRLEN`: the copy is then incomplete and the caller must not
+/// forward it.
 pub fn dup_strings(
     pid: libc::pid_t,
     ptrs: &[u64],
@@ -168,7 +230,15 @@ pub fn dup_strings(
     let mut out = Vec::with_capacity(ptrs.len());
     let mut total = 0usize;
     for &p in ptrs {
-        let s = read_cstr(pid, p, 4096).unwrap_or_default(); // unreadable -> empty
+        let s = match read_cstr_checked(pid, p, MAX_STRLEN) {
+            Some((s, complete)) => {
+                if !complete {
+                    *overflow = true;
+                }
+                s
+            }
+            None => Vec::new(), // unreadable -> empty
+        };
         total += s.len() + 1;
         if total > MAX_STR_TOTAL {
             *overflow = true;

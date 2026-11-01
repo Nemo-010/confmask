@@ -17,8 +17,8 @@
 
 use crate::caps::Caps;
 use crate::isolate::{self, Isolate};
-use crate::redact::mask::Mask;
-use crate::redact::tracer::ExitState;
+use crate::mask::Mask;
+use crate::ExitState;
 use crate::secret::{self, Delivery, Secret, Source};
 use std::ffi::{CString, OsString};
 use std::io;
@@ -64,6 +64,7 @@ pub struct Runner {
     isolate: Option<Isolate>,
     secrets: Vec<(String, Source)>,
     socket: Option<PathBuf>,
+    mask: Option<Mask>,
 }
 
 impl Default for Runner {
@@ -85,6 +86,7 @@ impl Runner {
             isolate: None,
             secrets: Vec::new(),
             socket: None,
+            mask: None,
         }
     }
 
@@ -145,6 +147,16 @@ impl Runner {
 
     pub fn daemon_socket(mut self, p: PathBuf) -> Runner {
         self.socket = Some(p);
+        self
+    }
+
+    /// Use a fully configured [`Mask`] for the redaction mode, instead of
+    /// the simple flags of this builder.  This is how the CLI hands one
+    /// parsed option set to both surfaces: every mask option (`--comm`,
+    /// `--argv0`, `--env`, `--no-dumpable`, `--rexec`, `--unshare`, the
+    /// session-end policy, ...) then applies to a `--secret` run too.
+    pub fn mask(mut self, mask: Mask) -> Runner {
+        self.mask = Some(mask);
         self
     }
 
@@ -209,26 +221,32 @@ impl Runner {
         // 3. Dispatch.
         let exit = match mode {
             Mode::Redact => {
-                let mut mask = Mask::new()
-                    .follow_tree(self.follow_tree)
+                let mut mask = match self.mask.clone() {
+                    Some(m) => m,
+                    None => {
+                        let m = Mask::new().follow_tree(self.follow_tree);
+                        let m = if self.redact_environ {
+                            m
+                        } else {
+                            m.keep_environ_visible()
+                        };
+                        let m = if self.exit_kill {
+                            m
+                        } else {
+                            m.let_tree_survive_self_death()
+                        };
+                        // No label means the engine's default: each
+                        // program's own basename, with arguments stripped.
+                        match &self.label {
+                            Some(l) => m.label(l.clone()),
+                            None => m,
+                        }
+                    }
+                };
+                mask = mask
                     .inherit_fds(delivery.raw_fds())
-                    .extra_env(std::mem::take(&mut extra_env));
-                // No label means the engine's default: each program's own
-                // basename, with arguments stripped.
-                if let Some(l) = &self.label {
-                    mask = mask.label(l.clone());
-                }
-                let mask = if self.redact_environ {
-                    mask
-                } else {
-                    mask.keep_environ_visible()
-                };
-                let mask = if self.exit_kill {
-                    mask
-                } else {
-                    mask.let_tree_survive_self_death()
-                };
-                let mask = if self.quiet {
+                    .envs(std::mem::take(&mut extra_env));
+                mask = if self.quiet {
                     mask.quiet()
                 } else if self.verbose {
                     mask.verbose()
@@ -242,7 +260,9 @@ impl Runner {
                 let child = mask.spawn(program.as_ref(), &args)?;
                 let comm = child.label_comm().to_vec();
                 let redact_env = child.redacts_environ();
-                crate::redact::selfmask::mask_self(&comm, redact_env);
+                if let Err(e) = crate::selfmask::mask_self(&comm, redact_env) {
+                    notes.push(format!("could not redact the supervisor's own /proc entry: {}", e));
+                }
                 child.wait()?
             }
             Mode::Isolate => {
@@ -315,15 +335,9 @@ impl Runner {
                 let status = cmd.status()?;
                 use std::os::unix::process::ExitStatusExt;
                 if let Some(sig) = status.signal() {
-                    ExitState {
-                        code: 128 + sig,
-                        signal: Some(sig),
-                    }
+                    ExitState::plain(128 + sig, Some(sig))
                 } else {
-                    ExitState {
-                        code: status.code().unwrap_or(255),
-                        signal: None,
-                    }
+                    ExitState::plain(status.code().unwrap_or(255), None)
                 }
             }
         };

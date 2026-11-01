@@ -1,0 +1,24 @@
+#compdef confmaskd
+# zsh completion for confmaskd.
+
+_confmaskd() {
+    _arguments -s \
+        '(-S --socket)'{-S,--socket}'[socket path]:socket:_files' \
+        '(-l --label)'{-l,--label}'[default label]:label:' \
+        '(-e --env-file)'{-e,--env-file}'[environment file]:file:_files' \
+        '--no-inherit-env[jobs get the env-file only]' \
+        '--keep-env[leave environ visible]' \
+        '--allow-uid[accept this uid]:uid:' \
+        '--run-as-uid[run jobs with the client uid]' \
+        '--socket-mode[socket permission bits]:octal:' \
+        '--io-timeout[drop a stalled client]:seconds:' \
+        '--job-timeout[kill a job after this long]:seconds:' \
+        '--jobs[run up to N jobs at once]:count:' \
+        '--max-job-bytes[largest job argument bytes]:bytes:' \
+        '(-q --quiet)'{-q,--quiet}'[suppress diagnostics]' \
+        '(-v --verbose)'{-v,--verbose}'[log each job]' \
+        '(-V --version)'{-V,--version}'[print version]' \
+        '(-h --help)'{-h,--help}'[print help]'
+}
+
+_confmaskd "$@"

@@ -42,7 +42,8 @@ pub enum Source {
     Env(String),
     /// `stdin` — read to EOF from standard input.
     Stdin,
-    /// `daemon:NAME` — fetched from a running `confmask daemon`.
+    /// `agent:NAME` (or the older spelling `daemon:NAME`) — fetched from
+    /// a running `confmask agent`.
     Daemon(String),
 }
 
@@ -67,7 +68,11 @@ impl Source {
             Source::File(PathBuf::from(p))
         } else if let Some(v) = rest.strip_prefix("env:") {
             Source::Env(v.to_string())
+        } else if let Some(v) = rest.strip_prefix("agent:") {
+            Source::Daemon(v.to_string())
         } else if let Some(v) = rest.strip_prefix("daemon:") {
+            // The agent was called `confmask daemon` before it was split
+            // from confmaskd; keep the old spelling working.
             Source::Daemon(v.to_string())
         } else if rest == "stdin" {
             Source::Stdin
@@ -171,7 +176,7 @@ pub fn load(name: &str, source: &Source, daemon_socket: Option<&PathBuf>) -> io:
             v.zeroize();
             b
         }
-        Source::Daemon(remote) => crate::daemon::fetch(daemon_socket, remote)?,
+        Source::Daemon(remote) => crate::agent::fetch(daemon_socket, remote)?,
     };
     Ok(Secret {
         name: name.to_string(),

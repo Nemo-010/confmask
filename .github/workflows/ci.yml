@@ -2,35 +2,102 @@ name: ci
 
 on:
   push:
+    branches: [main, "rust-*"]
   pull_request:
 
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - name: build
-        run: cargo build --release
-      - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
-      - name: unit tests
-        run: cargo test --lib
-      - name: suites
-        run: sh tests/run.sh
+permissions:
+  contents: read
 
-  vm:
-    # The interesting half: a runner usually bans ptrace and unprivileged
-    # user namespaces, so the two strongest modes are only exercised here.
-    runs-on: ubuntu-latest
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1 (master)
         with:
-          targets: x86_64-unknown-linux-musl
-      - name: install qemu
-        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 cpio
-      - name: micro-VM suite
+          toolchain: stable
+          components: clippy
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+      - name: clippy (zero warnings, MSRV-aware)
+        # clippy::incompatible_msrv reads rust-version from Cargo.toml
+        run: cargo clippy --all-targets -- -D warnings -W clippy::incompatible_msrv
+      - name: build (dynamic + static)
+        run: |
+          cargo build --release
+          cargo build --release --target x86_64-unknown-linux-musl
+      - name: build examples
+        run: cargo build --release --examples
+      - name: cross-check aarch64 (compile only, never run)
+        run: cargo check --target aarch64-unknown-linux-musl
+      - name: doc tests (no ptrace)
+        run: cargo test --doc
+      - name: library tests (no ptrace)
+        run: cargo test --lib
+      - name: unit-free sanity (no ptrace needed)
+        run: |
+          ./target/release/confmask --version
+          ./target/release/confmaskd --version
+          ./target/release/confmask-testcases echoargs a b | grep -q 'a.*b'
+      - name: daemon smoke (no ptrace needed)
+        run: |
+          ./target/release/confmaskd -q -S /tmp/cm-ci.sock &
+          DPID=$!
+          for i in $(seq 50); do [ -S /tmp/cm-ci.sock ] && break; sleep 0.1; done
+          test -S /tmp/cm-ci.sock
+          test "$(cat /proc/$DPID/comm)" = "confmask-job"
+          kill $DPID
+      - name: package dry run (clean checkout, no --allow-dirty)
+        run: cargo publish --dry-run
+
+  msrv:
+    # The toolchain version comes from rust-version in Cargo.toml, so the
+    # job and the manifest cannot disagree.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: read rust-version
+        id: msrv
+        run: |
+          v=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "MSRV is $v"
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1 (master)
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - name: build at the MSRV
+        run: |
+          rustc --version
+          cargo build --locked
+      - name: version smoke test
+        run: |
+          ./target/debug/confmask --version
+          ./target/debug/confmaskd --version
+
+  suites-in-vm:
+    # The ptrace suites run inside a QEMU micro-VM so they work on any
+    # runner, regardless of seccomp policy.  vm/run.sh runs them twice:
+    # as root and as uid 1000.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1 (master)
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl,i686-unknown-linux-musl
+      - name: install QEMU and cpio
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 cpio
+      - name: run full suite in micro-VM
         run: sh vm/run.sh
+      - name: upload VM log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: vm-output-log
+          path: vm/cache/vm-output.log

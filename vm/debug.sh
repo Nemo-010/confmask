@@ -1,27 +1,24 @@
 #!/bin/sh
-# Boot the micro-VM and run ONE shell script inside it.
-#   vm/debug.sh vm/cases/whatever.sh
-# The script runs with PATH=/bin:/app:/app/tests after boot.
+# VM debugging: boot the micro-VM and run ONE shell script inside it.
+#   vm/debug.sh path/to/check.sh
+# The script runs as root with PATH=/bin:/app:/app/tests after boot, on the
+# host architecture (uname -m: x86_64 or aarch64).  The binaries come from
+# target/<arch>-unknown-linux-musl/release, so run `cargo build --release
+# --target <arch>-unknown-linux-musl --bins` first.
 set -eu
-HERE="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(dirname "$HERE")"
-CACHE="$HERE/cache"
+. "$(dirname "$0")/common.sh"
 SCRIPT="${1:?usage: vm/debug.sh SCRIPT.sh}"
-MUSL_TARGET=x86_64-unknown-linux-musl
 
-[ -f "$CACHE/kernel/boot/vmlinuz-virt" ] || { echo "run vm/run.sh once first"; exit 2; }
+command -v "$QEMU" >/dev/null || { echo "missing: $QEMU"; exit 2; }
+command -v cpio >/dev/null   || { echo "missing: cpio";   exit 2; }
 
+vm_fetch_parts || exit 2
 cd "$ROOT"
 STAGE="$CACHE/stage-debug"
-rm -rf "$STAGE"
-mkdir -p "$STAGE/bin" "$STAGE/app/tests" "$STAGE/dev" "$STAGE/proc" "$STAGE/sys" "$STAGE/tmp"
-cp "$CACHE/busybox/bin/busybox.static" "$STAGE/bin/busybox"
-cp "target/$MUSL_TARGET/release/confmask" "$STAGE/app/tests/confmask"
-cp tests/lib.sh tests/run.sh "$STAGE/app/tests/"
+vm_stage "$STAGE"
 cp "$SCRIPT" "$STAGE/check.sh"
-chmod +x "$STAGE/app/tests/"*.sh "$STAGE/app/tests/confmask" "$STAGE/check.sh"
-
-cat > "$STAGE/init" <<'EOF'
+chmod +x "$STAGE/check.sh"
+cat > "$STAGE/init" <<'INIT'
 #!/bin/busybox sh
 export PATH=/bin:/app:/app/tests
 /bin/busybox mkdir -p /proc /sys /dev /tmp
@@ -29,20 +26,16 @@ export PATH=/bin:/app:/app/tests
 mount -t proc proc /proc 2>/dev/null
 mount -t sysfs sysfs /sys 2>/dev/null
 mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
-echo "=== VM ready (kernel $(uname -r))"
+echo "=== VM ready, arch $(uname -m)"
 sh /check.sh
 echo "CHECK-RC=$?"
 echo DONE-DEBUG
 poweroff -f
 while :; do sleep 1; done
-EOF
+INIT
 chmod +x "$STAGE/init"
+INITRD="$CACHE/initramfs-debug.cpio.gz"
+vm_pack "$STAGE" "$INITRD"
 
-(cd "$STAGE" && find . | cpio -o -H newc --quiet) | gzip -1 > "$CACHE/initramfs-debug.cpio.gz"
-
-timeout 300 qemu-system-x86_64 \
-    -m 512M -smp 2 \
-    -kernel "$CACHE/kernel/boot/vmlinuz-virt" \
-    -initrd "$CACHE/initramfs-debug.cpio.gz" \
-    -append "console=ttyS0 rdinit=/init quiet panic=-1" \
-    -nographic -no-reboot -monitor none 2>&1 | grep -v APK
+LOG="$CACHE/vm-debug.log"
+vm_boot "$KERNEL_IMAGE" "$INITRD" "$LOG" 180

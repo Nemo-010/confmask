@@ -1,811 +1,626 @@
-//! `confmask` command line.
+//! CLI argument parsing for `confmask`.
 
-use confmask::caps::Caps;
-use confmask::daemon;
+use confmask::daemon::RemoteLabel;
 use confmask::isolate::Isolate;
-use confmask::run::{Mode, Runner};
+use confmask::mask::Mask;
 use confmask::secret::Source;
-use confmask::store::{self, Passphrase, Store};
-use std::io::{self, BufRead, Read, Write};
-use std::os::unix::io::AsRawFd;
+use confmask::SessionEnd;
 use std::path::PathBuf;
+use std::ffi::OsString;
+use std::io::Read;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::io::FromRawFd;
+use std::process::exit;
 
-const USAGE: &str = "\
-confmask {version} - confidential computing without the hardware
+pub const HELP: &str = r#"
+confmask {version} ({arch}) - redact the /proc metadata of a whole process tree
 
-Run a command so that the other accounts on this machine learn as little
-as possible about it: its secrets travel as file descriptors instead of
-arguments or environment values, its secrets at rest are encrypted, and
-where the kernel allows it its whole process tree's /proc metadata
-(cmdline, environ, comm) is redacted.
+Run COMMAND with a presentation label in place of its real command line,
+environment and process name as seen through /proc (and therefore ps, top,
+htop, btop and any other process monitor).  Every process the command ever
+spawns - children, grandchildren, daemons, threads, posix_spawn/system(),
+static binaries, scripts - is covered.  Programs keep their real argv/envp
+and work completely normally.
 
-Usage: confmask <command> [options] [--] [command [args...]]
+Use it to keep secrets off the process table: tokens, passwords or internal
+hostnames passed as arguments are otherwise readable by every local account
+that can run `ps`, for the whole lifetime of a process.
 
-Commands:
-  run CMD [ARGS...]     run a command under confmask
-  probe                 what this host allows, and what that means
-  doctor                check the setup and report what is protected
-  store <sub>           manage the encrypted secret store
-                          init | set NAME | get NAME | list | rm NAME | path
-  daemon                hold the store unlocked and serve it locally
-  get NAME              ask a running daemon for one secret
-  read NAME             read a secret from an inherited descriptor
+Usage: confmask [OPTIONS] [--] COMMAND [ARGS...]
+       confmask [OPTIONS] --args-from-fd N
 
-run options:
-  -l, --label NAME      presentation label for /proc cmdline and comm
-      --secret N=SRC    deliver a secret; SRC is
-                          file:PATH | env:VAR | daemon:NAME | stdin | literal:VAL
-                        (repeatable; arrives at fd 3, 4, ... with
-                         CONFMASK_SECRET_<N> naming the descriptor)
-      --isolate[=LIST]  private namespaces (default: pid,net,tmp)
-      --no-redact       never touch /proc metadata, even where ptrace works
-      --keep-env        leave /proc/<pid>/environ visible when redacting
-      --no-follow       redact only the direct child
-      --no-exit-kill    let the tree survive if confmask dies
-      --socket PATH     daemon socket for daemon: sources
-  -q, --quiet           no diagnostics
-  -v, --verbose         trace what is redacted
-  -V, --version         print version
-  -h, --help            this help
+Options:
+  -l, --label NAME     Presentation label for every process' /proc cmdline
+                       and comm (e.g. --label 'ci-runner').  The value '-'
+                       gives a blank label (one space); '-l-', '-l -',
+                       '--label=-' and '--label -' all mean the same.
+                       The label must not contain NUL, LF or CR.
+                       Default: keep each program's own name, strip all
+                       arguments.
+      --label-empty    Empty label (cmdline shows nothing at all).
+      --argv0 NAME     argv[0] of the program.  Default: COMMAND exactly as
+                       typed (not the resolved path).
+      --comm NAME      comm name (what top shows), at most 15 bytes.
+                       Default: the label cut to 15 bytes.
+      --keep-env       Leave /proc/<pid>/environ visible (default: redacted).
+      --keep-env=NAME[,NAME...]
+                       Keep only the named variables visible in
+                       /proc/<pid>/environ; the rest stays redacted.  The
+                       inline '=' form is required.  Repeatable.
+      --env K=V        Add or replace one variable for the program.
+                       Repeatable.
+      --env-file PATH  Read variables for the program from PATH: one KEY=VALUE
+                       per line, '#' starts a comment line, blank lines are
+                       skipped, no quoting, values are taken as written.
+                       Repeatable.
+      --args-from-fd N Read the command from file descriptor N: NUL-separated
+                       program and arguments.  The secrets then never appear
+                       in confmask's own command line:
+                         confmask -l ci-runner --args-from-fd 3 3<args.bin
+      --on-exit POLICY What happens to descendants still running when the
+                       command exits: detach (default), wait or kill.
+      --no-follow      Redact only the direct child; descendants run
+                       unredacted (still traced, but never redacted).
+      --no-exit-kill   Let the tree survive if confmask dies (default: kill
+                       the whole tree, so no half-redacted orphans remain).
+      --no-dumpable    Set PR_SET_DUMPABLE=0 in every process of the tree.
+                       Same-uid observers cannot read environ, maps, exe or
+                       fd.  Core dumps and debugger attach stop working.
+      --no-new-privs   Set no_new_privs before exec.  Set-uid and file
+                       capabilities give nothing, for the whole tree.
+      --watch-rename   Keep the label as comm when a program renames itself
+                       (prctl PR_SET_NAME).  Uses a seccomp filter; implies
+                       --no-new-privs.  If the filter cannot be installed,
+                       one line is printed and the program runs without it.
+      --rexec          Exec the program from a sealed memfd so that
+                       /proc/<pid>/exe names the label, not the file.  On
+                       failure one line is printed and the normal exec runs.
+      --unshare        Run in new user, pid and mount namespaces with a
+                       private /proc, when the kernel allows it.  Otherwise
+                       one 'confmask: --unshare unavailable:' line is printed
+                       and the run continues without it.
+      --scope-name NAME
+                       Re-exec once through 'systemd-run --scope' so the tree
+                       runs in a transient scope named NAME.  The name is
+                       visible in /proc/<pid>/cgroup.  Without systemd one
+                       line is printed and the run continues.
+  -q, --quiet          Suppress diagnostics.
+  -v, --verbose        Trace every redaction event to stderr.
+  -V, --version        Print version.
+  -h, --help           This help.
+
+Compatibility aliases: -a NAME (= --label), -a- (= -l-), -E (= --keep-env),
+-F (= --no-follow), -K (= --no-exit-kill), -f/-c (accepted, no effect).
+
+Label limits: the label is cut at three places.  comm keeps 15 bytes.  The
+exec entry path keeps 254 bytes of the label.  The post-exec path (scripts)
+cuts the label to the span of the argument area.  A warning is printed once
+when the label is longer than 254 bytes.
+
+With --daemon PATH the job runs inside a confmaskd.  The daemon owns the
+masking policy and the environment: it refuses an environment from the
+client on purpose, so a client cannot change what the job inherits.  Mask
+options other than --label and --label-empty have no effect there and
+produce a warning.
+
+Environment: CONFMASK_NO_SELFMASK=1 disables the redaction of confmask's own
+/proc entry (argv, environ, comm).  Use it only for debugging.
+
+Secret side (works even where ptrace is refused):
+  --secret N=SRC       deliver a secret on descriptor 3, 4, ...  SRC is
+                       file:PATH | env:VAR | agent:NAME | stdin | literal:VAL.
+                       Repeatable; CONFMASK_SECRET_<N> names the descriptor in
+                       the child, and `confmask read NAME` prints it there.
+  --socket PATH        secret-agent socket for agent:NAME sources.
+  --isolate[=LIST]     run the payload in fresh namespaces: pid,net,tmp |
+                       all | none (default all).
+  --no-redact          never touch /proc metadata, even where ptrace works.
+
+  `confmask run ...` is this same parser; `confmask help` lists the rest
+  (store, agent, get, read, probe, doctor).
 
 Examples:
-  # a token that must never appear in `ps` output, on any host
-  confmask run --secret DEPLOY_TOKEN=file:./token -- ./deploy.sh
+  # a deployment whose token must not land in `ps` output:
+  confmask --label 'ci-runner' ./deploy.sh --token "$TOKEN" --env prod
 
-  # a long-lived runner: the store is unlocked once, in the daemon
-  confmask store init
-  confmask store set RUNNER_TOKEN < token.txt
-  confmask daemon &
-  confmask run --secret RUNNER_TOKEN=daemon:RUNNER_TOKEN -- ./runner
+  # long-lived worker started by a service manager:
+  confmask -q --label 'app-worker' python worker.py --queue=rediss://...
 
-  # untrusted code that should not see the rest of the machine
-  confmask run --isolate -- ./build.sh
-";
+Honest scope: root on the host always sees THAT a pid exists; confmask
+redacts WHAT it is.  /proc/<pid>/exe, maps, open files and cgroups still
+describe the real binary unless --rexec, --no-dumpable or --unshare is
+used.  Set-uid programs do not gain privileges under supervision (a
+general ptrace property)."#;
 
-fn help() -> String {
-    USAGE.replace("{version}", confmask::VERSION)
+pub struct Cli {
+    pub mask: Mask,
+    pub program: OsString,
+    pub args: Vec<OsString>,
+    /// `--daemon PATH`: ask a running confmaskd to run the job instead of
+    /// supervising it here.
+    pub daemon: Option<OsString>,
+    /// Label to send to the daemon.
+    pub remote_label: RemoteLabel,
+    /// `-q` is the last of `-q` and `-v`.
+    pub quiet: bool,
+    /// Mask options given on the command line that a daemon ignores.
+    pub mask_opts: Vec<&'static str>,
+    /// `--scope-name NAME`.
+    pub scope_name: Option<String>,
+    /// The command line without `--scope-name`, for the one re-exec.
+    pub reexec_argv: Vec<OsString>,
+    /// `--args-from-fd N`, until `load_args_fd` has read it.
+    pub args_fd: Option<libc::c_int>,
+    /// `--secret NAME=SRC`, delivered over descriptors.
+    pub secrets: Vec<(String, Source)>,
+    /// `--socket PATH`: the secret agent to ask for `agent:NAME` sources.
+    pub agent_socket: Option<PathBuf>,
+    /// `--isolate[=LIST]`: a private namespace set for the payload.
+    pub isolate: Option<Isolate>,
+    /// `--no-redact`: never touch /proc metadata.
+    pub no_redact: bool,
 }
 
-pub fn main() -> i32 {
-    let argv: Vec<String> = std::env::args().collect();
-    if argv.len() < 2 {
-        eprint!("{}", help());
-        return 255;
-    }
-    match argv[1].as_str() {
-        "-h" | "--help" | "help" => {
-            print!("{}", help());
-            0
-        }
-        "-V" | "--version" => {
-            println!(
-                "confmask {} ({})",
-                confmask::VERSION,
-                std::env::consts::ARCH
-            );
-            0
-        }
-        "probe" => cmd_probe(),
-        "doctor" => cmd_doctor(),
-        "run" => cmd_run(&argv[2..]),
-        "store" => cmd_store(&argv[2..]),
-        "daemon" => cmd_daemon(&argv[2..]),
-        "get" => cmd_get(&argv[2..]),
-        "read" => cmd_read(&argv[2..]),
-        other => {
-            eprintln!("confmask: unknown command '{}'", other);
-            eprint!("{}", help());
-            255
-        }
+impl Cli {
+    /// True when the run needs the secret machinery rather than the plain
+    /// mask path: any secret, isolation, or an explicit `--no-redact`.
+    pub fn needs_runner(&self) -> bool {
+        !self.secrets.is_empty() || self.isolate.is_some() || self.no_redact
     }
 }
 
-// ------------------------------------------------------------------ probe
-
-fn cmd_probe() -> i32 {
-    print!("{}", Caps::detect().report());
-    0
+fn die(msg: &str) -> ! {
+    eprintln!("confmask: {}", msg);
+    exit(255);
 }
 
-// ----------------------------------------------------------------- doctor
-
-fn cmd_doctor() -> i32 {
-    let caps = Caps::detect();
-    print!("{}", caps.report());
-
-    println!("store:");
-    let sp = store::default_path();
-    match std::fs::metadata(&sp) {
-        Ok(md) => {
-            use std::os::unix::fs::PermissionsExt;
-            println!(
-                "  {} ({} bytes, mode {:04o})",
-                sp.display(),
-                md.len(),
-                md.permissions().mode() & 0o777
-            );
+/// Fetch an option value: the attached bytes when present, otherwise the
+/// next argv element whatever it looks like (`-l -x` labels the process
+/// `-x`, matching the C tool).
+fn take_value(flag: &str, inline: Option<Vec<u8>>, argv: &[OsString], i: &mut usize) -> Vec<u8> {
+    match inline {
+        Some(v) => v,
+        None => {
+            *i += 1;
+            match argv.get(*i) {
+                Some(v) => v.as_bytes().to_vec(),
+                None => {
+                    eprintln!("confmask: option {} needs a value", flag);
+                    exit(255);
+                }
+            }
         }
-        Err(_) => println!("  {} (not created yet)", sp.display()),
     }
+}
 
-    let sock = daemon::default_socket();
-    println!(
-        "daemon:\n  {} {}",
-        sock.display(),
-        if daemon::ping(None) {
-            "(answering)"
-        } else {
-            "(not running)"
-        }
-    );
+/// Labels are presentation text, so they are decoded as UTF-8 (lossily).
+/// Program arguments are not: those are passed through byte for byte.
+fn label_from(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
 
-    println!("\nverdict:");
-    if caps.ptrace {
-        println!("  command lines can be redacted here (ptrace permitted)");
+/// The label for a `-l`/`--label` value: `-` means blank (one space) in
+/// every spelling.
+fn label_arg(bytes: &[u8]) -> String {
+    if bytes == b"-" {
+        " ".to_string()
     } else {
-        println!("  command lines CANNOT be redacted here (ptrace refused).");
-        println!("  keep secrets out of argv: use --secret with file:/daemon: sources,");
-        println!("  which deliver over descriptors and work without ptrace.");
+        label_from(bytes)
     }
-    if caps.userns {
-        println!("  --isolate is available (unprivileged user namespaces)");
-    } else {
-        println!("  --isolate is NOT available (no unprivileged user namespaces)");
-    }
-    0
 }
 
-// -------------------------------------------------------------------- run
+/// Parse an `--env-file`: `KEY=VALUE` lines, `#` comment lines, blank
+/// lines skipped.  Keys must be non-empty and free of NUL; values are
+/// taken as written.
+fn read_env_file(path: &[u8]) -> Vec<(OsString, OsString)> {
+    let shown = String::from_utf8_lossy(path).into_owned();
+    let p = std::path::Path::new(std::ffi::OsStr::from_bytes(path));
+    let data = match std::fs::read(p) {
+        Ok(d) => d,
+        Err(e) => die(&format!("--env-file {}: {}", shown, e)),
+    };
+    let mut out = Vec::new();
+    for (n, line) in data.split(|&b| b == b'\n').enumerate() {
+        let lineno = n + 1;
+        if line.is_empty() || line[0] == b'#' {
+            continue;
+        }
+        if line.contains(&0) {
+            die(&format!("--env-file {}: line {}: NUL byte", shown, lineno));
+        }
+        let eq = match line.iter().position(|&b| b == b'=') {
+            Some(p) if p > 0 => p,
+            _ => die(&format!(
+                "--env-file {}: line {}: expected KEY=VALUE",
+                shown, lineno
+            )),
+        };
+        out.push((
+            OsString::from_vec(line[..eq].to_vec()),
+            OsString::from_vec(line[eq + 1..].to_vec()),
+        ));
+    }
+    out
+}
 
-fn cmd_run(args: &[String]) -> i32 {
-    // Options are accumulated here and applied once, so a bad value never
-    // loses the ones already parsed.
-    let mut label: Option<String> = None;
-    let mut secrets: Vec<(String, Source)> = Vec::new();
-    let mut no_redact = false;
-    let mut keep_env = false;
-    let mut no_follow = false;
-    let mut no_exit_kill = false;
-    let mut socket: Option<PathBuf> = None;
-    let mut isolate: Option<Isolate> = None;
+fn parse_on_exit(v: &[u8]) -> SessionEnd {
+    match v {
+        b"detach" => SessionEnd::Detach,
+        b"wait" => SessionEnd::WaitTree,
+        b"kill" => SessionEnd::KillTree,
+        _ => die("--on-exit takes detach, wait or kill"),
+    }
+}
+
+fn note_opt(list: &mut Vec<&'static str>, name: &'static str) {
+    if !list.contains(&name) {
+        list.push(name);
+    }
+}
+
+/// Parse an already-copied argument vector.
+///
+/// `main` passes the copy it took before it zeroed the kernel-served argv
+/// block, so option parsing never depends on the process's own /proc
+/// entry.  The vector is `args_os` style: `std::env::args()` panics on a
+/// non-UTF-8 argument, and a supervisor must forward bytes exactly.
+pub fn parse_from(argv: Vec<OsString>) -> Cli {
+    let mut mask = Mask::new();
+    let mut daemon: Option<OsString> = None;
+    let mut remote_label = RemoteLabel::Default;
     let mut quiet = false;
-    let mut verbose = false;
+    let mut mask_opts: Vec<&'static str> = Vec::new();
+    let mut scope_name: Option<String> = None;
+    let mut skip: Vec<usize> = Vec::new();
+    let mut args_fd: Option<libc::c_int> = None;
+    let mut secrets: Vec<(String, Source)> = Vec::new();
+    let mut agent_socket: Option<PathBuf> = None;
+    let mut isolate: Option<Isolate> = None;
+    let mut no_redact = false;
+    let mut end_opts = false;
+    let mut i = 1usize;
 
-    let mut i = 0usize;
-    while i < args.len() {
-        let a = args[i].as_str();
-        if a == "--" {
+    while i < argv.len() {
+        let bytes = argv[i].as_bytes().to_vec();
+        // A token is an option only if it starts with '-' and has another
+        // byte; "-" alone is the command word.
+        if end_opts || bytes.len() < 2 || bytes[0] != b'-' {
+            break;
+        }
+        if bytes == b"--" {
+            end_opts = true;
             i += 1;
-            break;
+            continue;
         }
-        if !a.starts_with('-') || a == "-" {
-            break;
+        if bytes.starts_with(b"--") {
+            let body = &bytes[2..];
+            let (name_b, inline) = match body.iter().position(|&b| b == b'=') {
+                Some(p) => (&body[..p], Some(body[p + 1..].to_vec())),
+                None => (body, None),
+            };
+            let Ok(name) = std::str::from_utf8(name_b) else {
+                eprintln!(
+                    "confmask: unknown option --{}",
+                    String::from_utf8_lossy(name_b)
+                );
+                exit(255);
+            };
+            match name {
+                "label" => {
+                    let v = take_value("--label", inline, &argv, &mut i);
+                    let text = label_arg(&v);
+                    remote_label = RemoteLabel::Text(text.clone());
+                    mask = mask.label(text);
+                }
+                "daemon" => {
+                    let v = take_value("--daemon", inline, &argv, &mut i);
+                    daemon = Some(OsString::from_vec(v));
+                }
+                "label-empty" => {
+                    mask = mask.label("");
+                    remote_label = RemoteLabel::Empty;
+                }
+                "argv0" => {
+                    let v = take_value("--argv0", inline, &argv, &mut i);
+                    mask = mask.argv0(OsString::from_vec(v));
+                    note_opt(&mut mask_opts, "--argv0");
+                }
+                "comm" => {
+                    let v = take_value("--comm", inline, &argv, &mut i);
+                    mask = mask.comm(label_from(&v));
+                    note_opt(&mut mask_opts, "--comm");
+                }
+                "keep-env" => {
+                    match inline {
+                        None => mask = mask.keep_environ_visible(),
+                        Some(list) => {
+                            let names: Vec<String> = list
+                                .split(|&b| b == b',')
+                                .filter(|n| !n.is_empty())
+                                .map(label_from)
+                                .collect();
+                            if names.is_empty() {
+                                die("--keep-env= needs at least one name");
+                            }
+                            mask = mask.keep_env_vars(names);
+                        }
+                    }
+                    note_opt(&mut mask_opts, "--keep-env");
+                }
+                "env" => {
+                    let v = take_value("--env", inline, &argv, &mut i);
+                    match v.iter().position(|&b| b == b'=') {
+                        Some(p) if p > 0 => {
+                            mask = mask.env(
+                                OsString::from_vec(v[..p].to_vec()),
+                                OsString::from_vec(v[p + 1..].to_vec()),
+                            );
+                        }
+                        _ => die("--env needs KEY=VALUE"),
+                    }
+                    note_opt(&mut mask_opts, "--env");
+                }
+                "env-file" => {
+                    let v = take_value("--env-file", inline, &argv, &mut i);
+                    for (k, val) in read_env_file(&v) {
+                        mask = mask.env(k, val);
+                    }
+                    note_opt(&mut mask_opts, "--env-file");
+                }
+                "args-from-fd" => {
+                    let v = take_value("--args-from-fd", inline, &argv, &mut i);
+                    let n = std::str::from_utf8(&v)
+                        .ok()
+                        .and_then(|s| s.parse::<libc::c_int>().ok())
+                        .filter(|n| *n >= 0);
+                    match n {
+                        Some(n) => args_fd = Some(n),
+                        None => die("--args-from-fd needs a file descriptor number"),
+                    }
+                }
+                "on-exit" => {
+                    let v = take_value("--on-exit", inline, &argv, &mut i);
+                    mask = mask.session_end(parse_on_exit(&v));
+                    note_opt(&mut mask_opts, "--on-exit");
+                }
+                "no-follow" => {
+                    mask = mask.follow_tree(false);
+                    note_opt(&mut mask_opts, "--no-follow");
+                }
+                "no-exit-kill" | "no-exitkill" => {
+                    mask = mask.let_tree_survive_self_death();
+                    note_opt(&mut mask_opts, "--no-exit-kill");
+                }
+                "no-dumpable" => {
+                    mask = mask.no_dumpable();
+                    note_opt(&mut mask_opts, "--no-dumpable");
+                }
+                "no-new-privs" => {
+                    mask = mask.no_new_privs();
+                    note_opt(&mut mask_opts, "--no-new-privs");
+                }
+                "watch-rename" => {
+                    mask = mask.watch_rename();
+                    note_opt(&mut mask_opts, "--watch-rename");
+                }
+                "rexec" => {
+                    mask = mask.rexec();
+                    note_opt(&mut mask_opts, "--rexec");
+                }
+                "unshare" => {
+                    mask = mask.unshare();
+                    note_opt(&mut mask_opts, "--unshare");
+                }
+                "scope-name" => {
+                    let has_inline = inline.is_some();
+                    let v = take_value("--scope-name", inline, &argv, &mut i);
+                    // i now indexes the value token when it was separate
+                    skip.push(i);
+                    if !has_inline {
+                        skip.push(i - 1);
+                    }
+                    let text = label_from(&v);
+                    mask = mask.scope_name(text.clone());
+                    scope_name = Some(text);
+                    note_opt(&mut mask_opts, "--scope-name");
+                }
+                "secret" => {
+                    let v = take_value("--secret", inline, &argv, &mut i);
+                    match Source::parse(&String::from_utf8_lossy(&v)) {
+                        Ok(pair) => secrets.push(pair),
+                        Err(e) => die(&format!("--secret: {}", e)),
+                    }
+                }
+                "socket" => {
+                    let v = take_value("--socket", inline, &argv, &mut i);
+                    agent_socket = Some(PathBuf::from(OsString::from_vec(v)));
+                }
+                "isolate" => {
+                    isolate = match inline {
+                        None => Some(Isolate::all()),
+                        Some(list) => match confmask::subcmd::parse_isolate(&list) {
+                            Some(iso) => Some(iso),
+                            None => die("--isolate takes pid,net,tmp,all or none"),
+                        },
+                    };
+                    note_opt(&mut mask_opts, "--isolate");
+                }
+                "no-redact" => {
+                    no_redact = true;
+                    note_opt(&mut mask_opts, "--no-redact");
+                }
+                "quiet" => {
+                    mask = mask.quiet();
+                    quiet = true;
+                }
+                "verbose" => {
+                    mask = mask.verbose();
+                    quiet = false;
+                }
+                "version" => {
+                    println!("confmask {} ({})", confmask::VERSION, arch_name());
+                    exit(0);
+                }
+                "help" => {
+                    print_help(true);
+                    exit(0);
+                }
+                _ => {
+                    eprintln!("confmask: unknown option --{}", name);
+                    exit(255);
+                }
+            }
+            i += 1;
+            continue;
         }
-        match a {
-            "-h" | "--help" => {
-                print!("{}", help());
-                return 0;
-            }
-            "-V" | "--version" => {
-                println!("confmask {} ({})", confmask::VERSION, std::env::consts::ARCH);
-                return 0;
-            }
-            "-q" | "--quiet" => quiet = true,
-            "-v" | "--verbose" => verbose = true,
-            "--no-redact" => no_redact = true,
-            "--keep-env" => keep_env = true,
-            "--no-follow" => no_follow = true,
-            "--no-exit-kill" | "--no-exitkill" => no_exit_kill = true,
-            "--isolate" => isolate = Some(Isolate::all()),
-            "-l" | "--label" => match args.get(i + 1) {
-                Some(v) => {
-                    i += 1;
-                    label = Some(v.clone());
+        // short cluster: -qv, -afoo, -l-
+        let mut j = 1usize;
+        while j < bytes.len() {
+            match bytes[j] {
+                b'l' | b'a' => {
+                    let flag = if bytes[j] == b'l' { "-l" } else { "-a" };
+                    let inline: Option<Vec<u8>> = if j + 1 < bytes.len() {
+                        Some(bytes[j + 1..].to_vec())
+                    } else {
+                        None
+                    };
+                    let v = take_value(flag, inline, &argv, &mut i);
+                    let text = label_arg(&v);
+                    remote_label = RemoteLabel::Text(text.clone());
+                    mask = mask.label(text);
+                    j = bytes.len();
+                    continue;
                 }
-                None => return need_value("--label"),
-            },
-            "--secret" => match args.get(i + 1) {
-                Some(v) => {
-                    i += 1;
-                    match Source::parse(v) {
-                        Ok(pair) => secrets.push(pair),
-                        Err(e) => {
-                            eprintln!("confmask: --secret: {}", e);
-                            return 255;
-                        }
-                    }
+                b'E' => {
+                    mask = mask.keep_environ_visible();
+                    note_opt(&mut mask_opts, "--keep-env");
                 }
-                None => return need_value("--secret"),
-            },
-            "--socket" => match args.get(i + 1) {
-                Some(v) => {
-                    i += 1;
-                    socket = Some(PathBuf::from(v));
+                b'F' => {
+                    mask = mask.follow_tree(false);
+                    note_opt(&mut mask_opts, "--no-follow");
                 }
-                None => return need_value("--socket"),
-            },
-            _ => {
-                if let Some(v) = a.strip_prefix("--label=") {
-                    label = Some(v.to_string());
-                } else if let Some(v) = a.strip_prefix("--secret=") {
-                    match Source::parse(v) {
-                        Ok(pair) => secrets.push(pair),
-                        Err(e) => {
-                            eprintln!("confmask: --secret: {}", e);
-                            return 255;
-                        }
-                    }
-                } else if let Some(v) = a.strip_prefix("--isolate=") {
-                    match parse_isolate(v) {
-                        Some(iso) => isolate = Some(iso),
-                        None => {
-                            eprintln!("confmask: --isolate={}: want pid,net,tmp,all,none", v);
-                            return 255;
-                        }
-                    }
-                } else if let Some(v) = a.strip_prefix("--socket=") {
-                    socket = Some(PathBuf::from(v));
-                } else if let Some(v) = a.strip_prefix("-l") {
-                    label = Some(v.to_string());
-                } else {
-                    eprintln!("confmask: unknown option '{}'", a);
-                    return 255;
+                b'K' => {
+                    mask = mask.let_tree_survive_self_death();
+                    note_opt(&mut mask_opts, "--no-exit-kill");
+                }
+                b'f' | b'c' => {} // compat no-ops
+                b'q' => {
+                    mask = mask.quiet();
+                    quiet = true;
+                }
+                b'v' => {
+                    mask = mask.verbose();
+                    quiet = false;
+                }
+                b'V' => {
+                    println!("confmask {} ({})", confmask::VERSION, arch_name());
+                    exit(0);
+                }
+                b'h' => {
+                    print_help(true);
+                    exit(0);
+                }
+                other => {
+                    eprintln!(
+                        "confmask: unknown option -{}",
+                        String::from_utf8_lossy(&[other])
+                    );
+                    exit(255);
                 }
             }
+            j += 1;
         }
         i += 1;
     }
 
-    if i >= args.len() {
-        eprintln!("confmask: run needs a command");
-        return 255;
-    }
-
-    let mut r = Runner::new();
-    if let Some(l) = label {
-        r = r.label(l);
-    }
-    for (n, s) in secrets {
-        r = r.secret(n, s);
-    }
-    if let Some(s) = socket {
-        r = r.daemon_socket(s);
-    }
-    if no_redact {
-        r = r.no_redaction();
-    }
-    if keep_env {
-        r = r.keep_environ_visible();
-    }
-    if !no_follow {
-        // default is to follow
-    } else {
-        r = r.follow_tree(false);
-    }
-    if no_exit_kill {
-        r = r.let_tree_survive_self_death();
-    }
-    if quiet {
-        r = r.quiet();
-    } else if verbose {
-        r = r.verbose();
-    }
-    if let Some(iso) = isolate {
-        r = r.isolate(iso);
-    }
-
-    let program = args[i].clone();
-    let rest: Vec<std::ffi::OsString> = args[i + 1..]
+    let reexec_argv: Vec<OsString> = argv
         .iter()
-        .map(std::ffi::OsString::from)
+        .enumerate()
+        .skip(1)
+        .filter(|(idx, _)| !skip.contains(idx))
+        .map(|(_, a)| a.clone())
         .collect();
 
-    match r.run(&program, &rest) {
-        Ok(outcome) => {
-            if !quiet {
-                eprintln!(
-                    "confmask: mode={} secrets={} exit={}",
-                    outcome.mode.as_str(),
-                    outcome.secrets_delivered,
-                    outcome.exit.code
-                );
-                for n in &outcome.notes {
-                    eprintln!("confmask: note: {}", n);
-                }
-                if outcome.mode == Mode::Plain {
-                    eprintln!(
-                        "confmask: note: /proc metadata was not redacted here; \
-                         secrets travelled over descriptors, not argv/env"
-                    );
-                }
-            }
-            if let Some(sig) = outcome.exit.signal {
-                unsafe {
-                    libc::signal(sig, libc::SIG_DFL);
-                    libc::raise(sig);
-                }
-            }
-            outcome.exit.code
+    let (program, args) = if args_fd.is_some() {
+        if i < argv.len() {
+            die("--args-from-fd replaces COMMAND: no command may follow the options");
         }
-        Err(e) => {
-            eprintln!("confmask: {}", e);
-            255
-        }
-    }
-}
-
-fn parse_isolate(v: &str) -> Option<Isolate> {
-    if v == "all" || v.is_empty() {
-        return Some(Isolate::all());
-    }
-    if v == "none" {
-        return Some(Isolate {
-            pid: false,
-            net: false,
-            private_tmp: false,
-        });
-    }
-    let mut iso = Isolate {
-        pid: false,
-        net: false,
-        private_tmp: false,
-    };
-    for part in v.split(',') {
-        match part {
-            "pid" => iso.pid = true,
-            "net" => iso.net = true,
-            "tmp" => iso.private_tmp = true,
-            _ => return None,
-        }
-    }
-    Some(iso)
-}
-
-fn need_value(what: &str) -> i32 {
-    eprintln!("confmask: {} needs a value", what);
-    255
-}
-
-// ------------------------------------------------------------------ store
-
-fn cmd_store(args: &[String]) -> i32 {
-    let sub = match args.first() {
-        Some(s) => s.as_str(),
-        None => {
-            eprintln!("confmask: store needs a subcommand (init|set|get|list|rm|path)");
-            return 255;
-        }
-    };
-    let mut path = store::default_path();
-    let mut pass_file: Option<PathBuf> = None;
-    let mut from_file: Option<PathBuf> = None;
-    let mut positional: Vec<String> = Vec::new();
-    let mut i = 1usize;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--store" => match args.get(i + 1) {
-                Some(v) => {
-                    path = PathBuf::from(v);
-                    i += 1;
-                }
-                None => return need_value("--store"),
-            },
-            "--passphrase-file" => match args.get(i + 1) {
-                Some(v) => {
-                    pass_file = Some(PathBuf::from(v));
-                    i += 1;
-                }
-                None => return need_value("--passphrase-file"),
-            },
-            "--from-file" => match args.get(i + 1) {
-                Some(v) => {
-                    from_file = Some(PathBuf::from(v));
-                    i += 1;
-                }
-                None => return need_value("--from-file"),
-            },
-            s if s.starts_with("--store=") => path = PathBuf::from(&s[8..]),
-            s if s.starts_with("--passphrase-file=") => pass_file = Some(PathBuf::from(&s[18..])),
-            s if s.starts_with("--from-file=") => from_file = Some(PathBuf::from(&s[12..])),
-            s => positional.push(s.to_string()),
-        }
-        i += 1;
-    }
-
-    if sub == "path" {
-        println!("{}", path.display());
-        return 0;
-    }
-
-    let pp = match resolve_passphrase(pass_file.as_deref(), sub == "init") {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("confmask: {}", e);
-            return 255;
-        }
-    };
-
-    match sub {
-        "init" => {
-            if path.exists() {
-                eprintln!("confmask: {} already exists", path.display());
-                return 255;
-            }
-            match Store::create(&path, &pp) {
-                Ok(_) => {
-                    println!("created {}", path.display());
-                    0
-                }
-                Err(e) => {
-                    eprintln!("confmask: {}", e);
-                    255
-                }
-            }
-        }
-        "set" => {
-            let name = match positional.first() {
-                Some(n) => n.clone(),
-                None => {
-                    eprintln!("confmask: store set needs a NAME");
-                    return 255;
-                }
-            };
-            let mut bytes = match &from_file {
-                Some(p) => match std::fs::read(p) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        eprintln!("confmask: {}", e);
-                        return 255;
-                    }
-                },
-                None => {
-                    let mut v = Vec::new();
-                    if let Err(e) = io::stdin().read_to_end(&mut v) {
-                        eprintln!("confmask: {}", e);
-                        return 255;
-                    }
-                    v
-                }
-            };
-            if bytes.last() == Some(&b'\n') {
-                bytes.pop();
-            }
-            let mut st = match open_or_create(&path, &pp) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("confmask: {}", e);
-                    return 255;
-                }
-            };
-            if let Err(e) = st.set(&name, &bytes) {
-                eprintln!("confmask: {}", e);
-                return 255;
-            }
-            use zeroize::Zeroize;
-            bytes.zeroize();
-            match st.save(&pp) {
-                Ok(()) => {
-                    println!("set {}", name);
-                    0
-                }
-                Err(e) => {
-                    eprintln!("confmask: {}", e);
-                    255
-                }
-            }
-        }
-        "get" => {
-            let name = match positional.first() {
-                Some(n) => n.clone(),
-                None => {
-                    eprintln!("confmask: store get needs a NAME");
-                    return 255;
-                }
-            };
-            let st = match Store::open(&path, &pp) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("confmask: {}", e);
-                    return 255;
-                }
-            };
-            match st.get(&name) {
-                Some(v) => {
-                    let mut out = io::stdout();
-                    let _ = out.write_all(v);
-                    let _ = out.write_all(b"\n");
-                    0
-                }
-                None => {
-                    eprintln!("confmask: no secret named '{}'", name);
-                    1
-                }
-            }
-        }
-        "list" => {
-            let st = match Store::open(&path, &pp) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("confmask: {}", e);
-                    return 255;
-                }
-            };
-            for n in st.names() {
-                println!("{}", n);
-            }
-            0
-        }
-        "rm" => {
-            let name = match positional.first() {
-                Some(n) => n.clone(),
-                None => {
-                    eprintln!("confmask: store rm needs a NAME");
-                    return 255;
-                }
-            };
-            let mut st = match Store::open(&path, &pp) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("confmask: {}", e);
-                    return 255;
-                }
-            };
-            if !st.remove(&name) {
-                eprintln!("confmask: no secret named '{}'", name);
-                return 1;
-            }
-            match st.save(&pp) {
-                Ok(()) => {
-                    println!("removed {}", name);
-                    0
-                }
-                Err(e) => {
-                    eprintln!("confmask: {}", e);
-                    255
-                }
-            }
-        }
-        other => {
-            eprintln!("confmask: unknown store subcommand '{}'", other);
-            255
-        }
-    }
-}
-
-fn open_or_create(path: &std::path::Path, pp: &Passphrase) -> io::Result<Store> {
-    if path.exists() {
-        Store::open(path, pp)
+        (OsString::new(), Vec::new())
     } else {
-        Store::create(path, pp)
+        if i >= argv.len() {
+            print_help(false);
+            exit(255);
+        }
+        // Program and arguments keep their exact bytes.
+        (argv[i].clone(), argv[i + 1..].to_vec())
+    };
+
+    Cli {
+        mask,
+        program,
+        args,
+        daemon,
+        remote_label,
+        quiet,
+        mask_opts,
+        scope_name,
+        reexec_argv,
+        args_fd,
+        secrets,
+        agent_socket,
+        isolate,
+        no_redact,
     }
 }
 
-fn resolve_passphrase(explicit: Option<&std::path::Path>, creating: bool) -> io::Result<Passphrase> {
-    if let Some(p) = explicit {
-        return Passphrase::from_file(p);
+impl Cli {
+    /// Read the command from the `--args-from-fd` descriptor, when one
+    /// was given.  The descriptor is closed afterwards.
+    pub fn load_args_fd(&mut self) {
+        let Some(fd) = self.args_fd.take() else {
+            return;
+        };
+        // SAFETY: the descriptor number comes from the operator, who
+        // passes it open on purpose.  The File closes it after the read.
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let mut data = Vec::new();
+        if let Err(e) = file.read_to_end(&mut data) {
+            die(&format!("--args-from-fd {}: {}", fd, e));
+        }
+        drop(file);
+        let mut parts: Vec<Vec<u8>> = data.split(|&b| b == 0).map(|s| s.to_vec()).collect();
+        if data.last() == Some(&0) {
+            parts.pop(); // the empty piece after the final NUL
+        }
+        if parts.is_empty() || parts[0].is_empty() {
+            die(&format!("--args-from-fd {}: no program given", fd));
+        }
+        let mut it = parts.into_iter();
+        self.program = OsString::from_vec(it.next().unwrap_or_default());
+        self.args = it.map(OsString::from_vec).collect();
     }
-    if let Some(p) = std::env::var_os("CONFMASK_PASSPHRASE_FILE") {
-        return Passphrase::from_file(&PathBuf::from(p));
-    }
-    if let Some(v) = std::env::var_os("CONFMASK_PASSPHRASE") {
-        eprintln!(
-            "confmask: warning: CONFMASK_PASSPHRASE is set; it is visible in this process's environ"
-        );
-        use std::os::unix::ffi::OsStrExt;
-        return Passphrase::new(v.as_bytes());
-    }
-    prompt_passphrase(creating)
 }
 
-/// Read a passphrase from the controlling terminal with echo off.
-fn prompt_passphrase(creating: bool) -> io::Result<Passphrase> {
-    let tty = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")
-        .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                "no terminal to ask for a passphrase; use --passphrase-file PATH or CONFMASK_PASSPHRASE_FILE",
-            )
-        })?;
-    let fd = tty.as_raw_fd();
-    let mut term: libc::termios = unsafe { std::mem::zeroed() };
-    let have_term = unsafe { libc::tcgetattr(fd, &mut term) } == 0;
-    let orig = term;
-    if have_term {
-        term.c_lflag &= !libc::ECHO;
-        unsafe { libc::tcsetattr(fd, libc::TCSANOW, &term) };
-    }
-    let mut w = &tty;
-    let prompt = if creating {
-        "new passphrase: "
+/// `-h`/`--help` go to stdout and exit 0; a usage error goes to stderr
+/// and exits 255, like the C tool.
+/// The mask help text, with version and arch filled in.
+pub fn help_text() -> String {
+    HELP
+        .replace("{version}", confmask::VERSION)
+        .replace("{arch}", arch_name())
+}
+
+fn print_help(stdout: bool) {
+    let text = HELP
+        .replace("{version}", confmask::VERSION)
+        .replace("{arch}", arch_name());
+    if stdout {
+        println!("{}", text);
     } else {
-        "passphrase: "
-    };
-    let _ = w.write_all(prompt.as_bytes());
-    let _ = w.flush();
-
-    let mut line = String::new();
-    let mut r = io::BufReader::new(&tty);
-    let res = r.read_line(&mut line);
-    if have_term {
-        unsafe { libc::tcsetattr(fd, libc::TCSANOW, &orig) };
-    }
-    let _ = w.write_all(b"\n");
-    res?;
-    if line.ends_with('\n') {
-        line.pop();
-    }
-    if line.ends_with('\r') {
-        line.pop();
-    }
-    let pp = Passphrase::new(line.as_bytes())?;
-    use zeroize::Zeroize;
-    line.zeroize();
-    Ok(pp)
-}
-
-// ----------------------------------------------------------------- daemon
-
-fn cmd_daemon(args: &[String]) -> i32 {
-    let mut path = store::default_path();
-    let mut sock = daemon::default_socket();
-    let mut pass_file: Option<PathBuf> = None;
-    let mut allow: Vec<PathBuf> = Vec::new();
-    let mut i = 0usize;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--store" => match args.get(i + 1) {
-                Some(v) => {
-                    path = PathBuf::from(v);
-                    i += 1;
-                }
-                None => return need_value("--store"),
-            },
-            "--socket" => match args.get(i + 1) {
-                Some(v) => {
-                    sock = PathBuf::from(v);
-                    i += 1;
-                }
-                None => return need_value("--socket"),
-            },
-            "--passphrase-file" => match args.get(i + 1) {
-                Some(v) => {
-                    pass_file = Some(PathBuf::from(v));
-                    i += 1;
-                }
-                None => return need_value("--passphrase-file"),
-            },
-            "--allow" => match args.get(i + 1) {
-                Some(v) => {
-                    allow.push(PathBuf::from(v));
-                    i += 1;
-                }
-                None => return need_value("--allow"),
-            },
-            s if s.starts_with("--store=") => path = PathBuf::from(&s[8..]),
-            s if s.starts_with("--socket=") => sock = PathBuf::from(&s[9..]),
-            s if s.starts_with("--passphrase-file=") => pass_file = Some(PathBuf::from(&s[18..])),
-            s if s.starts_with("--allow=") => allow.push(PathBuf::from(&s[8..])),
-            other => {
-                eprintln!("confmask: daemon: unknown option '{}'", other);
-                return 255;
-            }
-        }
-        i += 1;
-    }
-    let pp = match resolve_passphrase(pass_file.as_deref(), false) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("confmask: {}", e);
-            return 255;
-        }
-    };
-    let st = match Store::open(&path, &pp) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("confmask: {}", e);
-            return 255;
-        }
-    };
-    let d = daemon::Daemon::new(st, sock, allow);
-    match d.serve() {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("confmask: daemon: {}", e);
-            255
-        }
+        eprintln!("{}", text);
     }
 }
 
-// -------------------------------------------------------------------- get
-
-fn cmd_get(args: &[String]) -> i32 {
-    let mut sock: Option<PathBuf> = None;
-    let mut name: Option<String> = None;
-    let mut i = 0usize;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--socket" => match args.get(i + 1) {
-                Some(v) => {
-                    sock = Some(PathBuf::from(v));
-                    i += 1;
-                }
-                None => return need_value("--socket"),
-            },
-            s if s.starts_with("--socket=") => sock = Some(PathBuf::from(&s[9..])),
-            s => name = Some(s.to_string()),
-        }
-        i += 1;
-    }
-    let name = match name {
-        Some(n) => n,
-        None => {
-            eprintln!("confmask: get needs a NAME");
-            return 255;
-        }
-    };
-    match daemon::fetch(sock.as_ref(), &name) {
-        Ok(v) => {
-            let mut out = io::stdout();
-            let _ = out.write_all(v.as_slice());
-            let _ = out.write_all(b"\n");
-            0
-        }
-        Err(e) => {
-            eprintln!("confmask: {}", e);
-            1
-        }
-    }
-}
-
-// ------------------------------------------------------------------- read
-
-/// Read a secret that `confmask run` delivered to this process, by name.
-fn cmd_read(args: &[String]) -> i32 {
-    let name = match args.first() {
-        Some(n) => n.clone(),
-        None => {
-            eprintln!("confmask: read needs a NAME");
-            return 255;
-        }
-    };
-    let var = confmask::secret::env_var_for(&name);
-    let fd_s = match std::env::var(&var) {
-        Ok(v) => v,
-        Err(_) => {
-            eprintln!(
-                "confmask: no secret named '{}' in this process ({} is not set)",
-                name, var
-            );
-            return 1;
-        }
-    };
-    let fd: i32 = match fd_s.parse() {
-        Ok(v) => v,
-        Err(_) => {
-            eprintln!("confmask: {} holds '{}', not a descriptor", var, fd_s);
-            return 255;
-        }
-    };
-    let mut out = io::stdout();
-    let mut buf = [0u8; 8192];
-    loop {
-        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
-        if n == 0 {
-            break;
-        }
-        if n < 0 {
-            let e = io::Error::last_os_error();
-            if e.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            eprintln!("confmask: read fd {}: {}", fd, e);
-            return 1;
-        }
-        let _ = out.write_all(&buf[..n as usize]);
-    }
-    let _ = out.write_all(b"\n");
-    0
+fn arch_name() -> &'static str {
+    confmask::arch_name()
 }

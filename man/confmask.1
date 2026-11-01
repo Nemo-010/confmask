@@ -1,0 +1,191 @@
+.TH CONFMASK 1 "2026" "confmask 0.1.0" "User Commands"
+.SH NAME
+confmask \- run a process tree with a redacted /proc entry
+.SH SYNOPSIS
+.B confmask
+[\fIOPTIONS\fR] [\fB\-\-\fR] \fICOMMAND\fR [\fIARGS\fR...]
+.br
+.B confmask
+[\fIOPTIONS\fR] \fB\-\-args\-from\-fd\fR \fIN\fR
+.SH DESCRIPTION
+.B confmask
+is a ptrace supervisor.
+It runs a program and every process that program spawns.
+Each process shows a presentation label in
+.BR /proc/ pid /cmdline
+and
+.BR /proc/ pid /comm
+instead of its real command line and process name.
+Every other local account sees the label.
+The program itself receives its real arguments and environment.
+.PP
+A process is syscall-supervised until its first exec completes.
+At the execve entry stop the supervisor rewrites the argument and
+environment pointer arrays of the old image.
+The kernel then copies the label and empty strings, so the real command
+line never exists in the new image.
+At the exec completion stop the supervisor writes the real strings into
+scratch space below the new stack pointer and repoints the arrays.
+.SH OPTIONS
+.TP
+.BR \-l ", " \-\-label " \fINAME\fR"
+Presentation label.
+The value
+.B \-
+gives a blank label (one space).
+The label must not contain NUL, LF or CR.
+Default: the program name, with all arguments removed.
+.TP
+.B \-\-label\-empty
+Empty label.
+.TP
+.BI \-\-argv0 " NAME"
+argv[0] of the program.
+Default: the command exactly as typed.
+.TP
+.BI \-\-comm " NAME"
+Process name for
+.BR top ,
+at most 15 bytes.
+Default: the label cut to 15 bytes.
+.TP
+.B \-\-keep\-env
+Leave
+.B /proc/\fIpid\fB/environ
+visible.
+.TP
+.BI \-\-keep\-env= NAME[,NAME...]
+Keep only the named variables visible.
+The inline form is required.
+Repeatable.
+.TP
+.BI \-\-env " K=V"
+Add or replace one variable.
+Repeatable.
+.TP
+.BI \-\-env\-file " PATH"
+Read variables from a file: one KEY=VALUE per line, # starts a comment
+line, blank lines are skipped, values are taken as written.
+Repeatable.
+.TP
+.BI \-\-args\-from\-fd " N"
+Read the command from file descriptor N as a NUL-separated vector:
+program first, then arguments.
+.TP
+.BI \-\-on\-exit " POLICY"
+What happens to descendants still running when the command exits:
+.B detach
+(default; each settled descendant is detached and keeps the label),
+.B wait
+(supervise until the whole tree exits) or
+.B kill
+(send SIGKILL).
+.TP
+.B \-\-no\-follow
+Redact only the direct child.
+Descendants are traced but not redacted.
+.TP
+.B \-\-no\-exit\-kill
+Do not set PTRACE_O_EXITKILL: the tree survives if the supervisor dies.
+.TP
+.B \-\-no\-dumpable
+Set PR_SET_DUMPABLE=0 in every process of the tree.
+Same-uid observers then cannot read environ, maps, exe or fd.
+Core dumps and debugger attach stop working.
+.TP
+.B \-\-no\-new\-privs
+Set no_new_privs before exec.
+Set-uid and file-capability programs gain nothing.
+.TP
+.B \-\-watch\-rename
+Revert a later prctl(PR_SET_NAME) to the label.
+Installs a seccomp filter that traps that call only.
+Implies
+.BR \-\-no\-new\-privs .
+.TP
+.B \-\-rexec
+Exec the program from a sealed memfd, so
+.B /proc/\fIpid\fB/exe
+names the label.
+.TP
+.B \-\-unshare
+Run in new user, pid and mount namespaces with a private /proc, when
+the kernel allows it.
+Prints one line and continues without it otherwise.
+.TP
+.BI \-\-scope\-name " NAME"
+Re-exec once through
+.BR "systemd-run \-\-scope" .
+The unit name is visible in
+.BR /proc/\fIpid\fB/cgroup .
+.TP
+.BR \-q ", " \-\-quiet
+Suppress diagnostics, including the session summary.
+.TP
+.BR \-v ", " \-\-verbose
+Trace every redaction event to stderr.
+.TP
+.BR \-V ", " \-\-version
+Print the version.
+.TP
+.BR \-h ", " \-\-help
+Print the help text.
+.SH ALIASES
+.BR \-a " (= \-\-label), " \-a\-
+(= \-l\-),
+.BR \-E " (= \-\-keep\-env), " \-F " (= \-\-no\-follow), " \-K " (= \-\-no\-exit\-kill)."
+.B \-f
+and
+.B \-c
+are accepted and have no effect.
+.SH ENVIRONMENT
+.TP
+.B CONFMASK_NO_SELFMASK
+Do not redact the supervisor's own /proc entry.
+Use only for debugging: the supervisor then shows its real command line,
+which contains the secrets it was given.
+.SH LABEL LIMITS
+The label is cut at three places.
+.B comm
+keeps 15 bytes.
+The exec entry path keeps 254 bytes.
+The post-exec path cuts the label to the span of the argument area.
+A warning is printed once when the label is longer than 254 bytes.
+.SH SESSION SUMMARY
+When any exec ran with less than the full entry-swap redaction, the
+session prints one line:
+.PP
+.RS
+confmask: \fIN\fR of \fIM\fR execs unredacted (\fIreasons\fR)
+.RE
+.PP
+The reasons are
+.BR script ,
+.BR reexec ,
+.BR unredacted ,
+.B comm
+and
+.BR foreign\-arch .
+.B \-\-quiet
+suppresses the line.
+.SH DAEMON MODE
+With
+.BI \-\-daemon " PATH"
+the job runs inside a
+.BR confmaskd (8).
+The daemon owns the environment and the masking policy.
+Mask options other than
+.B \-\-label
+and
+.B \-\-label\-empty
+have no effect there and produce a warning.
+.SH EXIT STATUS
+The exit status of the supervised command.
+A command killed by a signal makes
+.B confmask
+die by the same signal.
+Usage errors exit 255.
+.SH SEE ALSO
+.BR confmaskd (8)
+.SH LICENSE
+0BSD.

@@ -1,4 +1,11 @@
 /target
-/vm/cache
 /tests/confmask
-*.tmp
+/tests/confmaskd
+/tests/testcases
+/tests/testcases32
+/tests/protocases
+/tests/gospawn
+/vm/cache
+/vm/*.img
+/vm/output*.log
+Cargo.lock.orig

@@ -1,0 +1,32 @@
+#compdef confmask
+# zsh completion for confmask.  Static file for the hand-written parser.
+
+_confmask() {
+    _arguments -s \
+        '(-l --label)'{-l,--label}'[presentation label]:label:' \
+        '--label-empty[empty label]' \
+        '--argv0[argv[0] of the program]:name:' \
+        '--comm[process name for top]:name:' \
+        '--keep-env[leave environ visible]' \
+        '--keep-env=-[keep only named variables visible]:names:' \
+        '--env[add or replace one variable]:assignment:' \
+        '--env-file[read variables from a file]:file:_files' \
+        '--args-from-fd[read the command from a descriptor]:fd:' \
+        '--on-exit[what happens to descendants]:policy:(detach wait kill)' \
+        '--no-follow[redact only the direct child]' \
+        '--no-exit-kill[do not set PTRACE_O_EXITKILL]' \
+        '--no-dumpable[set PR_SET_DUMPABLE=0]' \
+        '--no-new-privs[set no_new_privs]' \
+        '--watch-rename[revert later renames to the label]' \
+        '--rexec[exec from a sealed memfd]' \
+        '--unshare[new user, pid and mount namespaces]' \
+        '--scope-name[systemd transient scope name]:name:' \
+        '--daemon[run the job in a confmaskd]:socket:_files' \
+        '(-q --quiet)'{-q,--quiet}'[suppress diagnostics]' \
+        '(-v --verbose)'{-v,--verbose}'[trace every event]' \
+        '(-V --version)'{-V,--version}'[print version]' \
+        '(-h --help)'{-h,--help}'[print help]' \
+        '*::command:_normal'
+}
+
+_confmask "$@"

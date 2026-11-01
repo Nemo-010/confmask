@@ -1,0 +1,39 @@
+#!/bin/busybox sh
+# init inside the micro-VM: mount the basics, run the suites twice (as
+# root, then as uid 1000), report both results.
+export PATH=/bin:/app:/app/tests
+
+/bin/busybox mkdir -p /proc /sys /dev /tmp /etc /home/user
+/bin/busybox --install -s /bin 2>/dev/null
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sysfs /sys 2>/dev/null
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+chmod 1777 /tmp
+
+echo "=== confmask VM: boot ok, kernel $(uname -r), arch $(uname -m)"
+
+# --- pass 1: root
+echo "=== running full test suite inside the VM as root (uid $(id -u))"
+cd /app/tests
+ID=root sh run.sh 2>&1
+rc=$?
+echo "VM-HARNESS-RESULT:$rc"
+
+# --- pass 2: an unprivileged uid.  Suites that need root (audit, userns
+# as root) read ID and `id -u` and skip themselves; everything that claims
+# to work unprivileged runs here.
+echo 'user:x:1000:1000:user:/home/user:/bin/sh' > /etc/passwd
+echo 'root:x:0:0:root:/root:/bin/sh' >> /etc/passwd
+echo 'user:x:1000:' > /etc/group
+echo 'root:x:0:' >> /etc/group
+chown -R 1000:1000 /app/tests /home/user
+echo "=== running full test suite inside the VM as uid 1000"
+su -s /bin/sh -c 'cd /app/tests && PATH=/bin:/app:/app/tests ID=nonroot sh run.sh 2>&1' user
+rc_nr=$?
+echo "VM-HARNESS-RESULT-NONROOT:$rc_nr"
+
+# give the serial console a moment to drain, then power off
+sleep 1
+poweroff -f
+# if poweroff is not instant, fall through to a halt
+while :; do sleep 1; done

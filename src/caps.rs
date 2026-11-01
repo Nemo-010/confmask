@@ -257,6 +257,54 @@ impl Caps {
         );
         s
     }
+
+    /// The same report as one JSON object, for a supervisor or a CI job
+    /// that wants to decide without parsing prose.
+    pub fn report_json(&self) -> String {
+        let b = |v: bool| if v { "true" } else { "false" };
+        format!(
+            concat!(
+                "{{\n",
+                "  \"arch\": \"{}\",\n",
+                "  \"kernel\": \"{}\",\n",
+                "  \"secret_fds\": true,\n",
+                "  \"memfd_secret\": {},\n",
+                "  \"mlock\": {},\n",
+                "  \"non_dumpable\": {},\n",
+                "  \"seccomp_filter\": {},\n",
+                "  \"metadata_redaction\": {},\n",
+                "  \"isolation\": {}\n",
+                "}}\n"
+            ),
+            json_escape(self.arch),
+            json_escape(&self.kernel),
+            b(self.memfd_secret),
+            b(self.mlock),
+            b(self.non_dumpable),
+            b(self.seccomp_filter),
+            b(self.ptrace),
+            b(self.userns)
+        )
+    }
+}
+
+/// Escape the characters JSON requires, and drop the rest of the C0 range
+/// (kernel release strings never contain them, but a report must be valid
+/// JSON whatever it is handed).
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str("\\uFFFD"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
