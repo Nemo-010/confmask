@@ -102,9 +102,9 @@ silently disagree again.
 Evidence that the hard cases work, from `tests/core.sh` inside the VM:
 
 - 10001 arguments: `argc=10004`, byte-exact tail, 0 sightings. The
-  hidden block had to move to an injected anonymous mapping because the
-  stack range below `sp` is unmapped at that size (the kernel's page
-  pinning does not expand a grow-down VMA).
+  hidden block lives in an injected anonymous mapping: the stack range
+  below `sp` is unmapped at that size (the kernel's page pinning does
+  not expand a grow-down VMA).
 - 5 KB and 100 KB single arguments: byte-exact, no tail leak.
 - 32-bit image: refused with one warning, program keeps its real argv,
   `foreign-arch` in the session summary.
@@ -241,8 +241,9 @@ the suite named, "docs" means documentation only.
 
 - `get_user_pages` (behind `process_vm_writev`) does not expand a
   grow-down stack VMA. Any write below `sp` beyond the faulted pages
-  returns `EFAULT`. The hidden block therefore falls back to an injected
-  `mmap`.
+  returns `EFAULT`, and the tracee's own frames overwrite a parked
+  block during its startup. The hidden block therefore always lives in
+  an injected `mmap`.
 - A 64-bit tracee can exec an ELF32 image; the entry stop still shows a
   native `execve`. Detecting 32-bit tracees by syscall ABI is not enough;
   read `EI_CLASS` of the target.

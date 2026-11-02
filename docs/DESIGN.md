@@ -96,19 +96,16 @@ At `PTRACE_EVENT_EXEC` the new image is mapped but the program has not
 started. The supervisor:
 
 1. reads `argc` from the new stack and locates the inline arrays,
-2. builds a block containing the real `argv` strings, the real `envp`
-   strings and the comm label, 16-byte aligned, below `sp - 4096`,
-3. if that stack range is not mapped, injects `mmap` and uses the new
-   anonymous mapping instead. The kernel's page pinning does not expand a
-   grow-down stack VMA, and a large argument block leaves the range below
-   `sp` unmapped,
-4. repoints the inline arrays at those strings, and checks every write,
-5. zeroes the visible string region, read from `/proc/<pid>/stat` fields
+2. injects `mmap` and parks the block containing the real `argv` strings,
+   the real `envp` strings and the comm label, 16-byte aligned, in a new
+   anonymous mapping inside the tracee,
+3. repoints the inline arrays at those strings, and checks every write,
+4. zeroes the visible string region, read from `/proc/<pid>/stat` fields
    48 to 51, and writes the label into `argv[0]`'s old slot,
-6. injects `prctl(PR_SET_NAME)` and, with `--no-dumpable`,
+5. injects `prctl(PR_SET_NAME)` and, with `--no-dumpable`,
    `prctl(PR_SET_DUMPABLE, 0)`, through a `syscall` instruction of the
    tracee,
-7. resumes.
+6. resumes.
 
 `argc`, the array positions and the auxiliary vector are untouched. glibc
 and musl cache `argv`/`environ` from the stack at startup, so the
@@ -287,8 +284,7 @@ Higher privileges buy more privacy in defined steps.
 | exec fails inside the child | original arrays restored, the process stays syscall-supervised, exit 127 (`ENOENT`) or 126 |
 | supervisor killed | tree killed via `PTRACE_O_EXITKILL`, no half-masked orphans |
 | tracee dies mid-injection | the tracee is dropped from the table; the tree continues |
-| hidden block cannot be placed on the stack | an anonymous mapping is created inside the tracee and used instead |
-| hidden block cannot be written at all | the visible region is zeroed, one warning is printed, the session summary names the exec |
+| hidden block cannot be written | the visible region is zeroed, one warning is printed, the session summary names the exec |
 | 32-bit image | one warning, not redacted, counted as `foreign-arch` |
 | daemon job fails | exit status returned to the client; the daemon keeps serving |
 | daemon socket is stale | the daemon connects to it first; a live daemon refuses the start, a refused connection is unlinked |

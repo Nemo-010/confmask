@@ -186,11 +186,10 @@ each job with the client's own uid and gid instead.
    target. The child's old image holds the parent's argv bytes from the
    fork until this stop; the kernel never copies them.
 3. **The program still gets its arguments.** At exec completion the
-   saved strings are written below the new image's stack pointer, or
-   into an injected anonymous mapping when that range is not mapped, and
-   the stack's inline arrays are repointed there. `argc`, the stack
-   layout and the auxiliary vector are untouched, so glibc, musl and
-   static binaries start normally.
+   saved strings are written into an injected anonymous mapping inside
+   the tracee and the stack's inline arrays are repointed there. `argc`,
+   the stack layout and the auxiliary vector are untouched, so glibc,
+   musl and static binaries start normally.
 4. **The process name is set too.** `prctl(PR_SET_NAME)` runs inside the
    tracee, through a `syscall` instruction in its own vDSO, so
    `/proc/<pid>/comm` shows the label. No writable-and-executable memory
