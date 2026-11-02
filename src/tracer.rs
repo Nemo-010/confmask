@@ -246,8 +246,45 @@ impl Tracer {
     /// it, releases it by writing one byte to `go_fd`, then takes the
     /// child's `SIGSTOP` handshake stop as the point from which the first
     /// exec is supervised.
-    pub fn supervise(mut self, master: libc::pid_t, go_fd: RawFd) -> io::Result<ExitState> {
+    pub fn supervise(
+        mut self,
+        master: libc::pid_t,
+        ready_fd: RawFd,
+        go_fd: RawFd,
+    ) -> io::Result<ExitState> {
         self.master = master;
+        // The child sends one handshake byte before it waits for the go
+        // signal; by then it has restored its own `dumpable` (a caller
+        // that hardens itself for secret material sets
+        // `PR_SET_DUMPABLE(0)`, and the child inherits it across the
+        // fork).  Reading the handshake first makes the seize
+        // deterministic: an unprivileged tracer may not seize a
+        // non-dumpable process even when it forked it.
+        let mut ready = [0u8; 1];
+        loop {
+            // SAFETY: reading one byte from the pipe end owned by this call.
+            let n = unsafe { libc::read(ready_fd, ready.as_mut_ptr() as *mut libc::c_void, 1) };
+            if n == 1 {
+                break;
+            }
+            if n == -1 && last_errno() == libc::EINTR {
+                continue;
+            }
+            // EOF: the child is gone before the handshake.
+            let mut st = 0i32;
+            // SAFETY: plain waitpid of our own child.
+            unsafe {
+                libc::waitpid(master, &mut st, libc::__WALL);
+            }
+            // SAFETY: pipe ends not used past this point.
+            unsafe {
+                libc::close(ready_fd);
+                libc::close(go_fd);
+            }
+            return Ok(finish_status(master, st));
+        }
+        // SAFETY: closing the pipe end owned by this call.
+        unsafe { libc::close(ready_fd) };
         if let Err(e) = self.seize(master) {
             // SAFETY: closing the pipe end owned by this call.
             unsafe { libc::close(go_fd) };
@@ -266,7 +303,10 @@ impl Tracer {
             libc::write(go_fd, byte.as_ptr() as *const libc::c_void, 1);
             libc::close(go_fd);
         }
-        let status = wait_master_stop(master)?;
+        let status = match wait_master_stop(master) {
+            Ok(s) => s,
+            Err(e) => return Err(e),
+        };
         if !libc::WIFSTOPPED(status) {
             // died before stopping (for example an internal error)
             return Ok(finish_status(master, status));
@@ -858,6 +898,10 @@ fn wait_master_stop(pid: libc::pid_t) -> io::Result<i32> {
         }
         return Ok(status);
     }
+}
+
+fn last_errno() -> i32 {
+    io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
 fn finish_status(pid: libc::pid_t, status: i32) -> ExitState {

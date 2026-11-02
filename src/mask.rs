@@ -665,8 +665,8 @@ impl Mask {
         let _g = session_lock();
         let mut prepared = self.prepare(program, args)?;
         let cfg = prepared.cfg.clone();
-        let (pid, go_fd) = fork_prepared(&mut prepared)?;
-        Tracer::new(cfg).supervise(pid, go_fd)
+        let (pid, ready_fd, go_fd) = fork_prepared(&mut prepared)?;
+        Tracer::new(cfg).supervise(pid, ready_fd, go_fd)
     }
 
     /// Start a program under the mask; the tracer runs on a background
@@ -695,7 +695,7 @@ impl Mask {
             .spawn(move || {
                 let _g = session_lock();
                 let mut prepared = prepared;
-                let (pid, go_fd) = match fork_prepared(&mut prepared) {
+                let (pid, ready_fd, go_fd) = match fork_prepared(&mut prepared) {
                     Ok(v) => v,
                     Err(e) => {
                         let _ = pid_tx.send(Err(e));
@@ -704,7 +704,7 @@ impl Mask {
                 };
                 drop(prepared);
                 let _ = pid_tx.send(Ok(pid));
-                let r = Tracer::new(cfg_thread).supervise(pid, go_fd);
+                let r = Tracer::new(cfg_thread).supervise(pid, ready_fd, go_fd);
                 let _ = st_tx.send(r);
             })
             .map_err(io::Error::other)?;
@@ -952,16 +952,31 @@ impl MaskedChild {
     }
 }
 
-/// Fork the supervised child on the calling thread.  Returns the pid and
-/// the write end of the go pipe: the child blocks on the read end until
-/// the tracer has seized it and writes one byte.  Only async-signal-safe
-/// calls happen in the child.
-fn fork_prepared(p: &mut Prepared) -> io::Result<(libc::pid_t, RawFd)> {
+/// Fork the supervised child on the calling thread.  Returns the pid,
+/// the child's readiness pipe end and the go pipe write end: the child
+/// writes one readiness byte (after it has restored its own `dumpable`)
+/// and then blocks on the read end until the tracer has seized it and
+/// writes one byte.  Only async-signal-safe calls happen in the child.
+fn fork_prepared(p: &mut Prepared) -> io::Result<(libc::pid_t, RawFd, RawFd)> {
+    let mut rdy = [0 as libc::c_int; 2];
     let mut fds = [0 as libc::c_int; 2];
-    // SAFETY: fds is a valid two-element array.
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } == -1 {
+    // Two pipes: the child's readiness byte (`rdy`, child -> tracer) and
+    // the go signal (`fds`, tracer -> child).  One pipe cannot serve
+    // both directions: whichever side reads first would consume the
+    // other side's byte.
+    if unsafe { libc::pipe2(rdy.as_mut_ptr(), libc::O_CLOEXEC) } == -1 {
         return Err(io::Error::last_os_error());
     }
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } == -1 {
+        // SAFETY: both read-pipe ends exist and are owned here.
+        unsafe {
+            libc::close(rdy[0]);
+            libc::close(rdy[1]);
+        }
+        return Err(io::Error::last_os_error());
+    }
+    let rdy_r = rdy[0];
+    let rdy_w = rdy[1];
     let go_r = fds[0];
     let go_w = fds[1];
 
@@ -987,33 +1002,65 @@ fn fork_prepared(p: &mut Prepared) -> io::Result<(libc::pid_t, RawFd)> {
     };
     if pid < 0 {
         let e = io::Error::last_os_error();
-        // SAFETY: both descriptors were created above.
+        // SAFETY: all four descriptors were created above.
         unsafe {
+            libc::close(rdy_r);
+            libc::close(rdy_w);
             libc::close(go_r);
             libc::close(go_w);
         }
         return Err(e);
     }
     if pid == 0 {
-        child_exec(p, in_userns && pid == 0, go_r, go_w);
+        child_exec(p, in_userns && pid == 0, rdy_r, rdy_w, go_r, go_w);
     }
-    // SAFETY: closing our copy of the read end and of the exec image.
+    // SAFETY: the parent's copy of the exec image is unused now; the
+    // child execs through its own.
     unsafe {
-        libc::close(go_r);
         if p.rexec_fd >= 0 {
             libc::close(p.rexec_fd);
             p.rexec_fd = -1;
         }
     }
-    Ok((pid, go_w))
+    // Parent side: keep `rdy_r` (the child's readiness byte) and `go_w`
+    // (the go signal).  Close the others so the readiness pipe ends
+    // read as EOF when the child dies before the handshake.
+    // SAFETY: pipe ends owned by this call.
+    unsafe {
+        libc::close(rdy_w);
+        libc::close(go_r);
+    }
+    Ok((pid, rdy_r, go_w))
 }
 
 /// Child side of `fork_prepared`.  Never returns.
-fn child_exec(p: &Prepared, in_userns: bool, go_r: RawFd, go_w: RawFd) -> ! {
+fn child_exec(p: &Prepared, in_userns: bool, rdy_r: RawFd, rdy_w: RawFd, go_r: RawFd, go_w: RawFd) -> ! {
     let quiet = p.cfg.quiet;
     // SAFETY: async-signal-safe libc calls on buffers built before the fork.
     unsafe {
+        // The tracer forks a fresh child that must be traced even when
+        // the caller already hardened itself (`PR_SET_DUMPABLE(0)`) with
+        // secret material in this process.  The child inherits that
+        // across the fork, so restore `dumpable`.  The child does not
+        // carry plaintext and after the exec it is dumpable anyway.
+        libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0);
         libc::prctl(libc::PR_SET_NAME, p.comm_z.as_ptr(), 0, 0, 0);
+
+        // Send the readiness byte: the tracer waits for it (see
+        // `Tracer::supervise`) before it seizes.
+        let rdy = [1u8; 1];
+        loop {
+            let n = libc::write(rdy_w, rdy.as_ptr() as *const libc::c_void, 1);
+            if n == 1 {
+                break;
+            }
+            if n == -1 && last_errno() == libc::EINTR {
+                continue;
+            }
+            libc::_exit(126);
+        }
+        libc::close(rdy_r);
+        libc::close(rdy_w);
         libc::close(go_w);
 
         if in_userns {

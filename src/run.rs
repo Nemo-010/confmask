@@ -206,7 +206,8 @@ impl Runner {
         // 1. Load secrets into protected memory.
         let mut secrets: Vec<Secret> = Vec::with_capacity(self.secrets.len());
         for (name, src) in &self.secrets {
-            secrets.push(secret::load(name, src, self.socket.as_ref())?);
+            let s = secret::load(name, src, self.socket.as_ref())?;
+            secrets.push(s);
         }
         let delivery = Delivery::new(&secrets)?;
         if !secrets.is_empty() {
@@ -257,7 +258,10 @@ impl Runner {
                 // then give the supervisor the same treatment it gives
                 // the tree: its own cmdline is `confmask run --secret
                 // TOKEN=file:...`, which names the secret.
-                let child = mask.spawn(program.as_ref(), &args)?;
+                let child = match mask.spawn(program.as_ref(), &args) {
+                    Ok(c) => c,
+                    Err(e) => return Err(e),
+                };
                 let comm = child.label_comm().to_vec();
                 let redact_env = child.redacts_environ();
                 if let Err(e) = crate::selfmask::mask_self(&comm, redact_env) {
