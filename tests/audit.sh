@@ -165,7 +165,7 @@ WPID=""
 # ------------------------------------------------------------ assertions
 # The kernel decides how much of an EXECVE record it sends.  On a kernel
 # that truncates the record before the argument text (observed on Alpine
-# linux-virt 6.12.114: the payload ends at `a0=`), this observer cannot
+# linux-virt 6.12.x: the payload ends at `a0=`), this observer cannot
 # see argv at all and every negative below would pass for free.  Detect
 # that case and skip with the reason, rather than reporting a green run
 # that proves nothing.
