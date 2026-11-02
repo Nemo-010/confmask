@@ -129,7 +129,8 @@ fn run_with_secrets(cli: cli::Cli) -> i32 {
                 if outcome.mode == Mode::Plain {
                     eprintln!(
                         "confmask: note: /proc metadata was not redacted here; \
-secrets travelled over descriptors, not argv/env"
+secrets travelled over descriptors (a literal: or env: source still \
+sat in confmask's own argv or environ)"
                     );
                 }
                 if outcome.exit.stats.execs > 0 {

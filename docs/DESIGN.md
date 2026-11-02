@@ -212,7 +212,7 @@ Client to daemon, with `SCM_RIGHTS` carrying stdin, stdout and stderr:
 
 ```
 1 byte   version (2)
-"CMK1"   u32 label_len  label  u8 label_mode
+"CMK2"   u8 label_mode  u32 label_len  label
          u32 argc       argc * (u32 len, bytes)
 ```
 
@@ -240,9 +240,12 @@ runs each job with the client's uid and gid instead.
 ### Socket safety
 
 The daemon refuses to start when the socket path is a symlink or not a
-socket, when a live daemon answers on it, or when the parent directory
-is not owned by the effective uid or is group or other writable. It
-binds with `umask 077` and verifies the bound socket afterwards.
+socket, or when a live daemon answers on it. The default path under
+`$XDG_RUNTIME_DIR` is only chosen when that directory is owned by the
+effective uid and not group- or world-writable; for an explicit
+`--socket` path the daemon checks the bound socket itself, not its
+parent directory. It binds with `umask 077` and verifies the bound
+socket afterwards.
 
 ### Timeouts and concurrency
 
@@ -261,6 +264,19 @@ The job environment is loaded at startup, kept in memory, and locked
 with `mlock`. `--no-inherit-env` makes the job environment exactly the
 `--env-file` contents. The daemon wipes the store and exits on
 `SIGTERM` or `SIGINT`.
+
+The CLI has a second, daemon-free secret path. `--secret NAME=SRC`
+delivers the value to the job on a sealed memfd descriptor (fd 3, 4,
+...); `confmask read NAME` prints it inside the job. Sources are
+`file:PATH`, `env:VAR`, `agent:NAME`, `stdin` and `literal:VAL`. The
+holder hardens itself (`PR_SET_DUMPABLE=0`, `RLIMIT_CORE=0`) before the
+label session starts. Two documented limits: a `literal:` or `env:`
+source still sits in confmask's own argv or environ, and the delivered
+descriptor survives `exec`, so every descendant inherits it and a
+same-uid peer can read `/proc/<pid>/fd/N`. The `confmask agent`
+subcommand runs a per-user service that holds the unlocked store and
+answers `GET <name>` over its own socket; it is the only source that
+keeps the plaintext out of the invoking process entirely.
 
 ## Privilege ladder
 

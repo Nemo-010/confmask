@@ -17,7 +17,7 @@
 //! line it would otherwise have read it from the environment:
 //!
 //! ```sh
-//! token=$(confmask read DEPLOY_TOKEN)      # or: cat <&3
+//! token=$(confmask read DEPLOY_TOKEN)
 //! ```
 
 use crate::mem::{SecBuf, SealedFd};

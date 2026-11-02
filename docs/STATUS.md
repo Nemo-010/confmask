@@ -20,14 +20,15 @@ how to resume. Read `docs/AGENTS.md` (map and invariants) and
   side's issues are separate and still open on this repository.
 - The two halves meet in one process: `src/run.rs` loads secrets,
   hardens the holder (`PR_SET_DUMPABLE=0`, `RLIMIT_CORE=0`) and then
-  starts the label session. What is verified end to end is the daemon
-  path: `tests/daemon.sh` d1-d3 assert that a labelled job receives a
-  daemon-supplied secret and that it appears in no `/proc` entry, in
-  both the root and the uid 1000 pass. What is not: no suite passes
-  `--secret` on the command line, so that delivery path
-  (`secret::load`, `Delivery`, `harden_self`) has unit tests only, and
-  no case asserts the label and a sealed descriptor together after a
-  single `execve`. See "Not verified".
+  starts the label session. The composed path is verified end to end:
+  `tests/daemon.sh` d1-d3 assert that a labelled job receives a
+  daemon-supplied secret and that it appears in no `/proc` entry, and
+  d7-d8 (same suite) pass `--secret` on the command line and assert,
+  for one child after a single `execve`, both the label in
+  `/proc/<pid>/cmdline` and the sealed descriptor on fd 3, in both the
+  root and the uid 1000 pass. What is still not asserted: the
+  same-account-peer `environ` checks and the burn-after-read form. See
+  "Not verified".
 
 ## How to verify
 
@@ -76,6 +77,7 @@ working budget is 10 GiB; keep `target/` and `vm/cache/` trimmed.
 | check | result |
 |---|---|
 | `cargo clippy --all-targets -- -D warnings` | clean |
+| `cargo clippy` on stable 1.99.1 with `-W clippy::incompatible_msrv` (2026-11-02) | clean, after fixing two new `match`-to-`?` lints and one unused variable |
 | `cargo test --lib` | 40 passed |
 | MSRV 1.85.1 build (`--bins`) | clean, no warnings |
 | `cargo package` (68 files) | packaged |
@@ -173,26 +175,24 @@ Two other gates:
    host only; the initramfs has none.
 5. The full aarch64 suite: only a smoke boot was done (see above), and
    the host this checkpoint was taken on has no `qemu-system-aarch64`.
-5. `tests/audit.sh` skips on this kernel: the `EXECVE` netlink record
+6. `tests/audit.sh` skips on this kernel: the `EXECVE` netlink record
    stops before the argument text (`payload_len=35`, ends at `a0=`), so
    the control cannot see its own secret. The suite prints the reason and
    the sample record. Options: run it on a host with `auditd` installed,
    or find a kernel that logs the text, or replace the observer with an
    eBPF/kprobe one (`CONFIG_KPROBE_EVENTS` and `BPF_SYSCALL` are on in the
    VM kernel, but no userland tool exists in the initramfs).
-6. The secret side beyond the daemon: no suite passes `--secret`, so
-   `secret::load`, `Delivery` and the `harden_self` path that precedes a
-   labelled session have unit tests only (`src/secret.rs`,
-   `src/store.rs`, `src/agent.rs`). No case runs one `execve` and then
-   asserts, against the same child, both the label in `/proc/<pid>/cmdline`
-   and the sealed descriptor on fd 3 with the secret absent from
-   `environ`. Until one does, the two mechanisms are verified separately,
-   not together.
-7. `--secret` has no burn-after-read form and the descriptor survives
+7. What the composed d7 case does not assert: a same-account peer's view
+   of the child's `/proc/<pid>/environ` (NUL-only) and the `EACCES` a
+   same-uid peer gets on the holder's environ while the holder is
+   dumpable-0. `--no-dumpable` alone is covered by O15, the composed
+   case is not.
+8. `--secret` has no burn-after-read form and the descriptor survives
    `exec`, so a descendant the caller did not intend inherits it. A
    same-uid peer can open `/proc/<child>/fd/3` and read the sealed value
    once the child has exec'd (the exec'd child is dumpable by design).
-   The README says so; no case distinguishes the three cases.
+   The README says so; d8 exercises and documents exactly that hazard,
+   and no case distinguishes a burn-after-read form because none exists.
 
 ## Per-issue state
 

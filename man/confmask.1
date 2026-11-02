@@ -25,7 +25,8 @@ environment pointer arrays of the old image.
 The kernel then copies the label and empty strings, so the real command
 line never exists in the new image.
 At the exec completion stop the supervisor writes the real strings into
-scratch space below the new stack pointer and repoints the arrays.
+an anonymous mapping injected inside the tracee and repoints the
+arrays.
 .SH OPTIONS
 .TP
 .BR \-l ", " \-\-label " \fINAME\fR"
@@ -130,6 +131,98 @@ Print the version.
 .TP
 .BR \-h ", " \-\-help
 Print the help text.
+.SH SECRET SIDE
+These options and the subcommands below work even where ptrace is
+refused.
+.TP
+.BI \-\-secret " N=SRC"
+Deliver a secret on descriptor 3, 4, ...; the child's environment
+variable
+.B CONFMASK_SECRET_<N>
+names the descriptor number.
+SRC is one of
+.BR file: PATH ,
+.BR env: VAR ,
+.BR agent: NAME ,
+.B stdin
+or
+.BR literal: VAL .
+Repeatable.
+A
+.B literal:
+or
+.B env:
+source still sits in confmask's own command line or environment, where
+/proc shows it; the value is absent from the child's /proc entry.
+The delivered descriptor survives exec, so every descendant inherits it
+and a same-uid peer can read /proc/<pid>/fd/N.
+.TP
+.BI \-\-socket " PATH"
+Secret-agent socket for
+.B agent: NAME
+sources.
+.TP
+.BI \-\-isolate "[=LIST]"
+Run the payload in fresh namespaces:
+.B pid,net,tmp
+|
+.B all
+|
+.B none
+(default all).
+.TP
+.B \-\-no\-redact
+Never touch /proc metadata, even where ptrace works.
+.SH SUBCOMMANDS
+.TP
+.B run " [OPTIONS] [--] CMD"
+The same parser as the default mode; accepts every option above.
+.TP
+.B read " NAME"
+Print a secret that
+.B run
+delivered to this process.
+One read per descriptor: the descriptor offset is shared with every
+inheritor.
+.TP
+.B store " <sub>"
+The encrypted store:
+.BR init ,
+.BR set\ NAME ,
+.BR get\ NAME ,
+.BR list ,
+.BR rm\ NAME ,
+.BR path .
+Options:
+.BI \-\-store " PATH"
+(default $XDG_DATA_HOME/confmask/store.enc),
+.BI \-\-passphrase\-file " P"
+and, for
+.BR "set" ,
+.BI \-\-from\-file " P"
+(the value then comes from P instead of stdin).
+.TP
+.B agent " [OPTIONS]"
+Hold the store unlocked and serve it over a socket.
+Options:
+.BI \-\-store " PATH,"
+.BI \-\-socket " PATH,"
+.BI \-\-passphrase\-file " P"
+and
+.BI \-\-allow " EXE"
+(repeatable; an exact-path allow-list).
+.TP
+.B get " NAME [--socket P]"
+Ask a running agent for one secret.
+.TP
+.B probe " [--json]"
+What this host allows, and what that means;\~\-\-json is machine-readable.
+.TP
+.B doctor
+The store, the agent and the verdict, in one report.
+.TP
+.BR help , " version
+Print the help text or the version.
 .SH ALIASES
 .BR \-a " (= \-\-label), " \-a\-
 (= \-l\-),

@@ -106,9 +106,11 @@ Client to daemon, with SCM_RIGHTS carrying stdin, stdout and stderr
 .RS
 1 byte version (2)
 .br
-"CMK1"  u32 label_len  label  u8 label_mode  u32 argc
+"CMK2"  u8 label_mode  u32 label_len  label
 .br
-\ \ \ \ \ \ \ \ argc * (u32 len, bytes)
+\ \ \ \ \ \ \ u32 argc
+.br
+\ \ \ \ \ \ \ \ \ \ argc * (u32 len, bytes)
 .RE
 .PP
 \fIlabel_mode\fR is 0 for the daemon label, 1 for an empty label and 2
@@ -130,8 +132,14 @@ The socket is created with mode 0600.
 The client also checks the peer uid of the socket it connected to.
 .SH SOCKET SAFETY
 The daemon refuses to start when the socket path is a symlink or not a
-socket, when a live daemon answers on it, or when the parent directory is
-not owned by the effective uid.
+socket, or when a live daemon answers on it.
+The default path under
+.B $XDG_RUNTIME_DIR
+is only chosen when that directory is owned by the effective uid and
+not group- or world-writable; for an explicit
+.BI \\-\-socket
+path the daemon checks the bound socket itself, not its parent
+directory.
 It binds with umask 077 and verifies the bound socket afterwards.
 .SH SEE ALSO
 .BR confmask (1)

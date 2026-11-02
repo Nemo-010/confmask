@@ -9,7 +9,7 @@
 //! short, in which the real data is visible through /proc.
 //!
 //! Completion (`PTRACE_EVENT_EXEC`): the saved real argv/envp strings are
-//! written into scratch space below the new image's initial SP and the
+//! written into an anonymous mapping injected inside the tracee and the
 //! stack's inline arrays are repointed there.  `argc`, the array
 //! positions and the auxiliary vector stay untouched, so every libc
 //! (glibc, musl, static) starts up normally and sees its own arguments.
@@ -280,7 +280,8 @@ impl Tracer {
 
     /// exec completed (`PTRACE_EVENT_EXEC`, or the exec's syscall-exit
     /// stop on kernels that skip the event): re-inject the real arguments
-    /// below SP, zero the visible copies, inject the comm label.
+    /// into the injected anonymous mapping, zero the visible copies,
+    /// inject the comm label.
     ///
     /// Every path ends in `finish_exec_complete`, which resumes the
     /// tracee: a tracee left stopped wedges the whole tree.
@@ -452,7 +453,8 @@ impl Tracer {
             }
         };
 
-        // 2. build the redaction block with the real strings below SP
+        // 2. build the redaction block with the real strings in the
+        //    injected anonymous mapping
         let block = match self.build_redaction_block(pid, &argv, &envp[..envc], pending_stop) {
             Ok(b) => b,
             Err(e) => {

@@ -257,7 +257,7 @@ CI uploads the console log as a build artifact.
 | `suite.sh` | spawn styles: threads, `posix_spawn`, `vfork`, double-fork daemons, nested scripts, raw `clone`+`execve`, comm, environ |
 | `stress.sh` | race probe against a tight `/proc` observer, 100 sequential execs, `EXITKILL`, signal and stdin passthrough, overhead |
 | `edge.sh` | non-UTF-8 argv, tracee-relative exec paths, long labels, label forms, self-mask, shebang scripts, option combinations |
-| `daemon.sh` | the job receives the secret; no `/proc` entry shows it; daemon self-mask; stdio and exit status; failure recovery |
+| `daemon.sh` | the job receives the secret; no `/proc` entry shows it; daemon self-mask; stdio and exit status; failure recovery; the CLI `--secret` path (label plus sealed descriptor after one `execve`); the documented same-uid `/proc/<pid>/fd/N` hazard |
 | `daemon_neg.sh` | protocol negatives: bad magic, bad version, oversize frames, missing and extra descriptors, unauthorised uid, stalled client, socket squatting, job timeout |
 | `options.sh` | every CLI and builder option: argv0, comm, label validation, `--env`, `--env-file`, `--keep-env=NAME`, `--args-from-fd`, self-mask, `--on-exit`, `--no-dumpable`, `--no-new-privs`, `--watch-rename`, `--rexec`, `--unshare` |
 | `core.sh` | exec from a non-leader thread, 5 KB and 100 KB arguments, 10001 arguments, 32-bit refusal, session end policies, job control, failed exec retry, injected repoint failure, the session summary, per-thread comm, setproctitle-style rewrite, `AT_EXECFN`, set-uid, `execveat` and `fexecve` |
@@ -323,7 +323,7 @@ suite.
 | bubblewrap | unprivileged user-namespace sandbox | does not touch argv, environ or comm |
 | firejail | set-uid sandbox | secrets on a command line stay visible in `ps` |
 | scriptzteam/Hidden | ptrace supervisor, acts at the exec-exit stop | the kernel has already copied the real argv into the new image, so a window exists |
-| `confmask` | ptrace supervisor, entry swap plus below-SP relocation | the window named in the limit list |
+| `confmask` | ptrace supervisor, entry swap plus re-injection into an anonymous mapping | the window named in the limit list |
 
 Every surveyed in-process technique must choose between title length and
 environment integrity. The exec-entry swap plus the relocation of the

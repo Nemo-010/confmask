@@ -9,14 +9,20 @@ _confmask() {
     opts="-l --label --label-empty --argv0 --comm --keep-env --env --env-file \
 --args-from-fd --on-exit --no-follow --no-exit-kill --no-dumpable \
 --no-new-privs --watch-rename --rexec --unshare --scope-name --daemon \
+--secret --socket --isolate --no-redact \
 -q --quiet -v --verbose -V --version -h --help -a -E -F -K"
+
+    if [ "$COMP_CWORD" -eq 1 ] && [[ "$cur" != -* ]]; then
+        COMPREPLY=( $(compgen -W "run store agent get read probe doctor help version" -- "$cur") )
+        return 0
+    fi
 
     case "$prev" in
         -l|--label|-a|--argv0|--comm|--scope-name)
             COMPREPLY=( $(compgen -W "ci-runner app-worker" -- "$cur") )
             return 0
             ;;
-        --daemon|--env-file)
+        --daemon|--env-file|--secret)
             COMPREPLY=( $(compgen -f -- "$cur") )
             return 0
             ;;

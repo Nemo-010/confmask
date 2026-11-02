@@ -16,7 +16,7 @@ pub const MAX_ENVV: usize = 1 << 20;
 pub const MAX_STRLEN: usize = 32 * 4096;
 /// Cap on saved argv+env string bytes (per exec).
 pub const MAX_STR_TOTAL: usize = 6 << 20;
-/// Cap on the redaction block written below the tracee's stack pointer.
+/// Cap on the injected redaction block (the hidden argv/envp copy).
 pub const MAX_HIDDEN: usize = 8 << 20;
 /// Number of `read_mem` calls so far (process-wide).  The tracer logs the
 /// delta per completion stop.

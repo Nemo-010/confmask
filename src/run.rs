@@ -7,13 +7,18 @@
 //! |---|---|---|
 //! | redact | `ptrace` | cmdline/environ/comm of the whole tree are redacted |
 //! | isolate | unprivileged user namespaces | the payload gets a private mount/pid/net view |
-//! | plain | nothing | secrets still arrive as descriptors, never as argv/env |
+//! | plain | nothing | the payload still receives its secrets on descriptors; no /proc redaction |
 //!
 //! Secret delivery is the same in all three, because it never needed a
 //! privilege: a sealed memfd inherited at a known descriptor.  That is
 //! the part that works in a locked-down container, and it is the part
 //! that matters most for the motivating case (a CI runner whose token is
 //! otherwise readable by everything on the machine).
+//!
+//! One honest caveat about plain mode (and about every mode for the
+//! supervisor itself): a `literal:` or `env:` secret source still sits
+//! in confmask's own argv or environment, where `/proc` shows it.  Use
+//! `file:` or `agent:` sources when that matters.
 
 use crate::caps::Caps;
 use crate::isolate::{self, Isolate};

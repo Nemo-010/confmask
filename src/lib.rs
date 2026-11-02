@@ -37,7 +37,7 @@
 //! process is syscall-supervised until its first exec settles): the
 //! kernel never copies the real command line into the new image of an
 //! ELF target.  The real arguments are then re-injected
-//! into scratch space below the new image's stack pointer, where the
+//! into an anonymous mapping injected inside the tracee, where the
 //! program's own libc finds them — `argc`, the stack layout and the
 //! auxiliary vector are untouched.
 //!
