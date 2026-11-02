@@ -29,6 +29,7 @@
 #   O18 --rexec shows a memfd as /proc/<pid>/exe
 #   O19 --unshare shows only the payload in /proc
 #   O20 mask options with --daemon print a warning
+#   O21 a --env-file with an empty key or a NUL byte is refused
 # ============================================================================
 set -u
 cd "$(dirname "$0")"
@@ -594,6 +595,46 @@ err=$("$TOOL" --daemon "$T/no-such.sock" --label x -- true 2>&1 >/dev/null)
 printf '%s' "$err" | grep -qi "warning" \
     && fail "o20-control-label-only-has-no-warning (stderr: $err)" \
     || pass o20-control-label-only-has-no-warning
+
+# ------------------------------------------ O21: env-file grammar refusal
+# Catches: an empty key, a missing separator or a NUL byte silently kept.
+# The CLI surface cannot produce a key containing '=' ('--env' splits at
+# the first '='), and NUL is unrepresentable in argv, so the two reachable
+# bad states live in an env file.  Refusal must be the 255 exit of the
+# option parser, before anything is forked.
+printf 'no-separator-here\n' > "$T/envbad1"
+err=$("$TOOL" -q --env-file "$T/envbad1" true 2>&1 >/dev/null); rc=$?
+if [ "$rc" = 255 ] && printf '%s' "$err" | grep -q "expected KEY=VALUE"; then
+    pass o21-env-file-no-separator-refused
+else
+    fail "o21-env-file-no-separator-refused (rc=$rc err=[$err])"
+fi
+
+printf '=emptykey\n' > "$T/envbad2"
+err=$("$TOOL" -q --env-file "$T/envbad2" true 2>&1 >/dev/null); rc=$?
+if [ "$rc" = 255 ] && printf '%s' "$err" | grep -q "expected KEY=VALUE"; then
+    pass o21-env-file-empty-key-refused
+else
+    fail "o21-env-file-empty-key-refused (rc=$rc err=[$err])"
+fi
+
+printf 'MK-OPT-NULKEY\0x=y\n' > "$T/envbad3"
+nuls=$(tr -cd '\0' < "$T/envbad3" | wc -c | tr -d ' ')
+if [ "$nuls" != 1 ]; then
+    skip "o21-env-file-nul-byte (this printf cannot write NUL bytes: $nuls found, want 1)"
+else
+    err=$("$TOOL" -q --env-file "$T/envbad3" true 2>&1 >/dev/null); rc=$?
+    if [ "$rc" = 255 ] && printf '%s' "$err" | grep -q "NUL byte"; then
+        pass o21-env-file-nul-byte-refused
+    else
+        fail "o21-env-file-nul-byte-refused (rc=$rc err=[$err])"
+    fi
+    # control: the same key with a real separator is accepted
+    printf 'MK-OPT-NULKEY=1\n' > "$T/envgood1"
+    "$TOOL" -q --env-file "$T/envgood1" true >/dev/null 2>&1 && \
+        pass o21-control-good-key-accepted || \
+        fail "o21-control-good-key-accepted (rc=$?)"
+fi
 
 echo "== VERDICT: FAIL=$FAIL =="
 [ "$FAIL" = 0 ]

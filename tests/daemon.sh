@@ -12,6 +12,11 @@
 #   D4  the daemon's own /proc entry carries the label, not its argv
 #   D5  exit status and stdout pass through the daemon
 #   D6  a job that cannot exec fails with 127 and the daemon survives it
+#   D7  the CLI --secret path: one execve, the child's cmdline is the
+#       label, the sealed descriptor sits where the delivery pointer
+#       names it, the value is in no /proc entry, the write is refused
+#   D8  that descriptor, once the child has exec'd, is readable by a
+#       same-uid process through /proc (the documented hazard)
 # ============================================================================
 set -u
 cd "$(dirname "$0")"
@@ -119,6 +124,92 @@ if [ "$rc" = 127 ] && [ "$OUT" = "alive" ]; then
 else
     fail "d6-failed-job-keeps-daemon (rc=$rc out='$OUT')"
 fi
+
+# ------------------------------------------------ D7/D8: CLI --secret path
+# This is the local command line path, not the daemon: the runner loads
+# the secret, hardens itself and starts the labelled session; the
+# descriptor is written into the child between fork and exec.  One case
+# checks what the exec'd child sees, one checks what a same-uid observer
+# can collect from /proc while the child is parked.
+D7OUT="/tmp/confmask-d7out-$$"
+D7LBL="cm-cli-$$"
+D7LBL15=$(printf '%s' "$D7LBL" | cut -c1-15)
+"$TOOL" -q -l "$D7LBL" --secret "CID_TOKEN=literal:$SECRET" -- \
+    "$CASES" secretfd CID_TOKEN 30 >"$D7OUT" 2>/dev/null &
+D7SUP=$!
+n=0
+while [ "$n" -lt 40 ]; do
+    [ -s "$D7OUT" ] && break
+    sleep 0.1
+    n=$((n + 1))
+done
+# Both the supervisor and the exec'd child show exactly the label as their
+# cmdline; the child is the one whose parent is another label cmdline.
+cands=""
+for d in /proc/[0-9]*; do
+    txt=$(tr -d '\000' < "$d/cmdline" 2>/dev/null)
+    [ "$txt" = "$D7LBL" ] || continue
+    cands="$cands ${d#/proc/}"
+done
+d7_child=""
+for c in $cands; do
+    pp=$(awk '/^PPid:/{print $2}' "/proc/$c/status" 2>/dev/null)
+    case " $cands " in
+        *" $pp "*) d7_child=$c ;;
+    esac
+done
+
+# D7: no /proc entry carries the secret while the job runs (the daemon
+# case D3 covers the daemon path; the supervisor has zeroed its own copy).
+leaks=0
+for d in /proc/[0-9]*; do
+    for f in cmdline environ; do
+        if cat "$d/$f" 2>/dev/null | tr '\0' '\n' | grep -qF -- "$SECRET"; then
+            leaks=$((leaks + 1))
+        fi
+    done
+done
+[ "$leaks" = 0 ] && pass d7-cli-secret-in-no-proc-entry \
+    || fail "d7-cli-secret-in-no-proc-entry ($leaks sightings)"
+
+if [ -n "$d7_child" ]; then
+    # D7: the visible cmdline of the exec'd child is the label.
+    ctxt=$(cat "/proc/$d7_child/cmdline" 2>/dev/null)
+    [ "$ctxt" = "$D7LBL" ] && pass d7-cli-child-cmdline-is-label \
+        || fail "d7-cli-child-cmdline-is-label ([$(printf '%s' "$ctxt" | head -c 60)])"
+
+    # D8: a same-uid process can open that descriptor through /proc and
+    # read the whole value.  This is the documented hazard: the child is
+    # dumpable after exec, so a peer of the same uid can read the value
+    # of any descriptor it keeps open.  The seal only stops mutations.
+    SZ=$(cat "/proc/$d7_child/fd/3" 2>/dev/null | wc -c | tr -d ' ')
+    if [ "$SZ" = "$LEN" ]; then
+        pass d8-same-uid-can-read-fd3-documented-hazard
+    else
+        fail "d8-same-uid-can-read-fd3-documented-hazard (read $SZ bytes, want $LEN)"
+    fi
+else
+    fail "d7-cli-payload-not-found (no parked payload with label cmdline)"
+fi
+kill "$D7SUP" 2>/dev/null
+sleep 0.3
+kill "$d7_child" 2>/dev/null
+
+# D7: what the payload itself reported, after it exits.
+wait "$D7SUP" 2>/dev/null
+D7TXT=$(cat "$D7OUT" 2>/dev/null)
+printf '%s\n' "$D7TXT" | grep -q '^fd=3$' \
+    && pass d7-cli-descriptor-at-3 || fail "d7-cli-descriptor-at-3 ($D7TXT)"
+printf '%s\n' "$D7TXT" | grep -q "^bytes=$LEN\$" \
+    && pass d7-cli-bytes-reach-child || fail "d7-cli-bytes-reach-child ($D7TXT)"
+printf '%s\n' "$D7TXT" | grep -q '^path=/memfd:confmask-secret' \
+    && pass d7-cli-memfd-backing || fail "d7-cli-memfd-backing ($D7TXT)"
+printf '%s\n' "$D7TXT" | grep -q '^write-errno=1$' \
+    && pass d7-cli-sealed-against-write || fail "d7-cli-sealed-against-write ($D7TXT)"
+printf '%s\n' "$D7TXT" | grep -qF -- "$SECRET" \
+    && fail "d7-cli-report-names-the-secret" \
+    || pass d7-cli-report-names-the-secret
+rm -f "$D7OUT"
 
 kill "$DPID" 2>/dev/null
 rm -f "$SOCK" "$ENVF"
