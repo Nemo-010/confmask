@@ -415,7 +415,7 @@ fn holdscan(args: &[String]) -> i32 {
                 .unwrap_or(usize::MAX);
             if n != usize::MAX && n >= 8 {
                 let mut last = 0u8;
-                for (w, chunk) in buf
+                for (w, _chunk) in buf
                     .chunks_exact(8)
                     .take(n / 8)
                     .enumerate()

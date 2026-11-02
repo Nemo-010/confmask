@@ -303,10 +303,7 @@ impl Tracer {
             libc::write(go_fd, byte.as_ptr() as *const libc::c_void, 1);
             libc::close(go_fd);
         }
-        let status = match wait_master_stop(master) {
-            Ok(s) => s,
-            Err(e) => return Err(e),
-        };
+        let status = wait_master_stop(master)?;
         if !libc::WIFSTOPPED(status) {
             // died before stopping (for example an internal error)
             return Ok(finish_status(master, status));

@@ -258,10 +258,7 @@ impl Runner {
                 // then give the supervisor the same treatment it gives
                 // the tree: its own cmdline is `confmask run --secret
                 // TOKEN=file:...`, which names the secret.
-                let child = match mask.spawn(program.as_ref(), &args) {
-                    Ok(c) => c,
-                    Err(e) => return Err(e),
-                };
+                let child = mask.spawn(program.as_ref(), &args)?;
                 let comm = child.label_comm().to_vec();
                 let redact_env = child.redacts_environ();
                 if let Err(e) = crate::selfmask::mask_self(&comm, redact_env) {
