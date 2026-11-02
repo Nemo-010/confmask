@@ -24,7 +24,7 @@
 use crate::arch::{self, Regs};
 use crate::remote::{
     dup_strings, peek_word, poke_word, read_cstr, read_ptr_array, write_mem, zero_range, MAX_ARGV,
-    MAX_ENVV, MAX_HIDDEN, MAX_STRLEN, SCRATCH_GUARD,
+    MAX_ENVV, MAX_HIDDEN, MAX_STRLEN,
 };
 use crate::tracer::{State, Tracer};
 use std::io;
@@ -453,7 +453,7 @@ impl Tracer {
         };
 
         // 2. build the redaction block with the real strings below SP
-        let block = match self.build_redaction_block(pid, sp, &argv, &envp[..envc], pending_stop) {
+        let block = match self.build_redaction_block(pid, &argv, &envp[..envc], pending_stop) {
             Ok(b) => b,
             Err(e) => {
                 // Fail closed on the visible strings: empty is better
@@ -633,13 +633,12 @@ impl Tracer {
         }
     }
 
-    /// Build and write the redaction block just below SP: the real
-    /// argv/envp strings and the comm label.  Returns absolute tracee
-    /// addresses.
+    /// Build and write the redaction block: the real argv/envp strings
+    /// and the comm label, in an anonymous mapping inside the tracee.
+    /// Returns absolute tracee addresses.
     fn build_redaction_block(
         &mut self,
         pid: libc::pid_t,
-        sp: u64,
         argv: &[Vec<u8>],
         envp: &[Vec<u8>],
         pending_stop: &mut Option<i32>,
@@ -678,22 +677,13 @@ impl Tracer {
         }
         buf[comm_off..comm_off + comm.len()].copy_from_slice(&comm);
 
-        // First choice: scratch space below the new stack pointer.  It is
-        // already mapped when the kernel placed a large argument block
-        // there; a small block needs a few pages that the kernel has not
-        // faulted in, and get_user_pages does not expand a grow-down
-        // stack VMA, so a refused write falls through to the next choice.
-        let stack_base = (sp - SCRATCH_GUARD - total as u64) & !15u64;
-        if stack_base != 0 && write_block(pid, stack_base, &buf).is_ok() {
-            return Ok(RedactionBlock {
-                str_addrs: offsets_to_addrs(&aoff, &eoff, stack_base),
-                comm_addr: stack_base + comm_off as u64,
-            });
-        }
-
-        // Second choice: an anonymous mapping inside the tracee, created
-        // by an injected mmap.  It costs one mapping in /proc/<pid>/maps
-        // and works regardless of the stack layout.
+        // The strings cannot be parked in the tracee stack: the block
+        // would sit below `SP - 4096`, and the tracee's own runtime
+        // frames grow downward into exactly that region once it resumes,
+        // overwriting the middle of the parked argv and truncating the
+        // strings the child reads at startup.  An anonymous mapping is
+        // created inside the tracee instead.  It costs one mapping in
+        // /proc/<pid>/maps and is stable against stack growth.
         let site = crate::inject::find_syscall_site(pid, None, self.fault_no_vdso)
             .ok_or_else(|| io::Error::other("no syscall instruction for mmap"))?;
         let regs = Regs::get(pid)?;

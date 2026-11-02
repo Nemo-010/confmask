@@ -18,9 +18,6 @@ pub const MAX_STRLEN: usize = 32 * 4096;
 pub const MAX_STR_TOTAL: usize = 6 << 20;
 /// Cap on the redaction block written below the tracee's stack pointer.
 pub const MAX_HIDDEN: usize = 8 << 20;
-/// Keep one page below SP untouched (redaction block starts below it).
-pub const SCRATCH_GUARD: u64 = 4096;
-
 /// Number of `read_mem` calls so far (process-wide).  The tracer logs the
 /// delta per completion stop.
 pub static READ_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
